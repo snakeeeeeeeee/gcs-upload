@@ -140,7 +140,7 @@ type Pool struct {
 	accounts       []*Account
 	defaultBucket  string
 	bucketLocation string
-	maxSize        int64
+	maxSize        atomic.Int64 // 单文件上限（字节），可热更新
 	retry          int
 	circuitThresh  int
 	coolDown       time.Duration
@@ -220,7 +220,6 @@ func New(ctx context.Context, cfg Config) (*Pool, error) {
 	p := &Pool{
 		defaultBucket:  cfg.DefaultBucket,
 		bucketLocation: cfg.BucketLocation,
-		maxSize:        cfg.MaxSize * 1024 * 1024, // MB → 字节
 		retry:          cfg.Retry,
 		circuitThresh:  defaultCircuit,
 		coolDown:       defaultCoolDown,
@@ -236,6 +235,7 @@ func New(ctx context.Context, cfg Config) (*Pool, error) {
 		apiKeys:        make(map[string]struct{}),
 		sem:            make(chan struct{}, cfg.MaxConcurrent),
 	}
+	p.maxSize.Store(cfg.MaxSize * 1024 * 1024) // MB → 字节
 
 	for _, k := range cfg.APIKeys {
 		if k != "" {
@@ -1020,11 +1020,17 @@ func (p *Pool) DefaultBucket() string {
 }
 
 // MaxSize 单文件上限（字节）
-func (p *Pool) MaxSize() int64 { return p.maxSize }
+func (p *Pool) MaxSize() int64 { return p.maxSize.Load() }
 
 // MaxSizeMB 单文件上限（MB，管理页展示用）
 func (p *Pool) MaxSizeMB() int64 {
-	return p.maxSize / 1024 / 1024
+	return p.maxSize.Load() / 1024 / 1024
+}
+
+// SetMaxSizeMB 运行时修改单文件上限（MB，热生效，后续上传按新值校验）
+func (p *Pool) SetMaxSizeMB(mb int64) {
+	p.maxSize.Store(mb * 1024 * 1024)
+	slog.Info("pool: max_size changed", "mb", mb)
 }
 
 // TTLDays 全局存储期限（天）；<=0 表示永久存储

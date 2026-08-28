@@ -328,6 +328,7 @@ func (h *Handler) UpdateConfig(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		DefaultBucket string `json:"default_bucket"`
 		TTLDays       *int   `json:"ttl_days"`
+		MaxSizeMB     *int64 `json:"max_size_mb"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&req); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid json: "+err.Error())
@@ -359,10 +360,26 @@ func (h *Handler) UpdateConfig(w http.ResponseWriter, r *http.Request) {
 		}
 		slog.Info("admin: ttl_days changed", "days", *req.TTLDays)
 	}
+	if req.MaxSizeMB != nil {
+		if *req.MaxSizeMB < 1 || *req.MaxSizeMB > 512000 {
+			writeErr(w, http.StatusBadRequest, "max_size_mb must be 1-512000 (MB)")
+			return
+		}
+		h.pool.SetMaxSizeMB(*req.MaxSizeMB)
+		h.mu.Lock()
+		err := h.updateConfig(func(cfg *pool.Config) { cfg.MaxSize = *req.MaxSizeMB })
+		h.mu.Unlock()
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "persist config: "+err.Error())
+			return
+		}
+		slog.Info("admin: max_size changed", "mb", *req.MaxSizeMB)
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":             true,
 		"default_bucket": h.pool.DefaultBucket(),
 		"ttl_days":       h.pool.TTLDays(),
+		"max_size_mb":    h.pool.MaxSizeMB(),
 	})
 }
 

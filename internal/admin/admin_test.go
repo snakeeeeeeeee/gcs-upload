@@ -327,3 +327,33 @@ func fakeKeyJSON() []byte {
 	b, _ := json.Marshal(fakeKey)
 	return b
 }
+
+func TestUpdateConfigMaxSizeTTL(t *testing.T) {
+	h, p, cfgPath := newTestHandler(t)
+	// 修改 max_size_mb + ttl_days
+	rec := doReq(h, "POST", "/admin/config", []byte(`{"max_size_mb":8,"ttl_days":30}`), loginCookie(t, h))
+	if rec.Code != 200 {
+		t.Fatalf("update config: got %d want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	if p.MaxSizeMB() != 8 {
+		t.Fatalf("pool MaxSizeMB: got %d want 8", p.MaxSizeMB())
+	}
+	if p.MaxSize() != 8*1024*1024 {
+		t.Fatalf("pool MaxSize bytes: got %d want %d", p.MaxSize(), 8*1024*1024)
+	}
+	if p.TTLDays() != 30 {
+		t.Fatalf("pool TTLDays: got %d want 30", p.TTLDays())
+	}
+	// 写回 config.json
+	cfg := readCfg(t, cfgPath)
+	if cfg.MaxSize != 8 || cfg.TTLDays != 30 {
+		t.Fatalf("config persisted: max_size=%d ttl_days=%d, want 8/30", cfg.MaxSize, cfg.TTLDays)
+	}
+	// 非法值拒绝
+	if rec := doReq(h, "POST", "/admin/config", []byte(`{"max_size_mb":0}`), loginCookie(t, h)); rec.Code != 400 {
+		t.Fatalf("max_size_mb=0: got %d want 400", rec.Code)
+	}
+	if rec := doReq(h, "POST", "/admin/config", []byte(`{"max_size_mb":999999}`), loginCookie(t, h)); rec.Code != 400 {
+		t.Fatalf("max_size_mb too big: got %d want 400", rec.Code)
+	}
+}

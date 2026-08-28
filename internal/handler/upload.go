@@ -23,14 +23,13 @@ import (
 
 // UploadHandler 上传接口
 type UploadHandler struct {
-	pool    *pool.Pool
-	recs    *records.Store
-	maxSize int64
+	pool *pool.Pool
+	recs *records.Store
 }
 
 // New 创建上传 handler
 func New(p *pool.Pool, recs *records.Store) *UploadHandler {
-	return &UploadHandler{pool: p, recs: recs, maxSize: p.MaxSize()}
+	return &UploadHandler{pool: p, recs: recs}
 }
 
 // Upload POST /upload，multipart 表单，字段名 file
@@ -60,8 +59,8 @@ func (h *UploadHandler) Upload(w http.ResponseWriter, r *http.Request) {
 	}
 	defer h.pool.Release()
 
-	// 限制请求体大小（multipart 开销 + 文件本体）
-	r.Body = http.MaxBytesReader(w, r.Body, h.maxSize+(16<<20))
+	// 限制请求体大小（multipart 开销 + 文件本体；上限实时从池读取，后台改 max_size 立即生效）
+	r.Body = http.MaxBytesReader(w, r.Body, h.pool.MaxSize()+(16<<20))
 	if err := r.ParseMultipartForm(32 << 20); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid multipart form: "+err.Error())
 		return
@@ -84,10 +83,19 @@ func (h *UploadHandler) Upload(w http.ResponseWriter, r *http.Request) {
 	tmpName := tmp.Name()
 	defer os.Remove(tmpName)
 
-	size, err := io.Copy(tmp, file)
+	// 精确单文件上限：流式截断读取 maxSize+1 字节，超出立即拒绝（无需先落盘整个文件）
+	// 上限实时从池读取，后台改 max_size 立即生效
+	maxSize := h.pool.MaxSize()
+	size, err := io.Copy(tmp, io.LimitReader(file, maxSize+1))
 	if err != nil {
 		tmp.Close()
 		writeErr(w, http.StatusBadRequest, "read upload body: "+err.Error())
+		return
+	}
+	if size > maxSize {
+		tmp.Close()
+		writeErr(w, http.StatusRequestEntityTooLarge,
+			fmt.Sprintf("file too large: %d bytes, limit is %d MB", size, maxSize/1024/1024))
 		return
 	}
 	if err := tmp.Close(); err != nil {
