@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"runtime"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -75,8 +76,34 @@ type Config struct {
 	HealthInterval  int             `json:"health_check_interval"` // 健康检查间隔（秒），默认 300（5 分钟）；0 关闭
 	ScanInterval    int             `json:"keys_scan_interval"`    // keys/ 目录自动扫描间隔（秒），默认 60；0 关闭
 	BucketLocation  string          `json:"bucket_location"`       // 自动创建桶的区域（默认 "US"）
-	APIKeys         []string        `json:"api_keys"`               // 客户端 API Key 列表（Authorization: Bearer <key>）
-	Accounts        []AccountConfig `json:"accounts"`              // 号池
+	APIKeys         APIKeyList       `json:"api_keys"`              // 客户端 API Key 列表（Authorization: Bearer <key>）
+	Accounts        []AccountConfig  `json:"accounts"`               // 号池
+}
+
+// APIKey 客户端 API Key 及其备注名（name 可空）
+type APIKey struct {
+	Key  string `json:"key"`
+	Name string `json:"name,omitempty"`
+}
+
+// APIKeyList []*APIKey 列表类型，提供自定义 JSON 解码（兼容旧 []string 配置）
+type APIKeyList []APIKey
+
+// UnmarshalJSON 优先解析新格式 []APIKey；旧 config 中是 []string 时，逐项当作 {Key: s} 处理
+func (l *APIKeyList) UnmarshalJSON(b []byte) error {
+	var ll []APIKey
+	if err := json.Unmarshal(b, &ll); err == nil {
+		*l = ll
+		return nil
+	}
+	var ss []string
+	if err := json.Unmarshal(b, &ss); err != nil {
+		return err
+	}
+	for _, s := range ss {
+		*l = append(*l, APIKey{Key: s})
+	}
+	return nil
 }
 
 // Account 运行时的"号"
@@ -124,14 +151,18 @@ type State struct {
 
 // Stats 汇总统计
 type Stats struct {
-	Accounts     int   `json:"accounts"`
-	Enabled      int   `json:"enabled"`
-	CircuitOpen  int   `json:"circuit_open"`
-	HealthOK     int   `json:"health_ok"`
-	HealthFail   int   `json:"health_fail"`
-	TotalUploads int64 `json:"total_uploads"`
-	TotalFail    int64 `json:"total_fail"`
+	Accounts     int    `json:"accounts"`
+	Enabled      int    `json:"enabled"`
+	CircuitOpen  int    `json:"circuit_open"`
+	HealthOK     int    `json:"health_ok"`
+	HealthFail   int    `json:"health_fail"`
+	TotalUploads int64  `json:"total_uploads"`
+	TotalFail    int64  `json:"total_fail"`
 	SuccessRate  string `json:"success_rate"`
+	InFlight     int    `json:"in_flight"`   // 当前正在处理的请求数（占用并发名额）
+	MaxConcurrent int    `json:"max_concurrent"` // 全局并发上限（热更新值）
+	RPM          int    `json:"rpm"`        // 最近 60 秒完成的上传数
+	MemMB        int    `json:"mem_mb"`     // 进程堆分配 MB
 }
 
 // Pool GCS 号池
@@ -154,9 +185,13 @@ type Pool struct {
 	healthStop     chan struct{}
 	healthDone     chan struct{}
 	apiKeysMu      sync.RWMutex
-	apiKeys        map[string]struct{}
+	apiKeys        map[string]string // key → name（空字符串表示无备注）
 	sem            *dynSem      // 动态并发信号量（容量可热更新）
 	counter        atomic.Uint64
+	// RPM ring：固定槽位，存最近完成时间（纳秒）；写指针原子递增取模，无需锁。
+	// 1024 槽 ≈ 极限 1024/min 即 ~17 RPS；超过会被覆盖（覆盖前会先被读取统计，覆盖导致的是短时间略偏低，对监控够用）
+	rpmBuf [1024]int64
+	rpmIdx atomic.Uint64
 }
 
 // UploadResult 上传成功后的返回信息
@@ -232,7 +267,7 @@ func New(ctx context.Context, cfg Config) (*Pool, error) {
 		healthInterval: time.Duration(cfg.HealthInterval) * time.Second,
 		healthStop:     make(chan struct{}),
 		healthDone:     make(chan struct{}),
-		apiKeys:        make(map[string]struct{}),
+		apiKeys:        make(map[string]string),
 		sem:            newDynSem(cfg.MaxConcurrent),
 	}
 	p.maxSize.Store(cfg.MaxSize * 1024 * 1024)   // MB → 字节
@@ -241,8 +276,8 @@ func New(ctx context.Context, cfg Config) (*Pool, error) {
 	p.requestTimeout.Store(int64(time.Duration(cfg.RequestTimeout) * time.Second))
 
 	for _, k := range cfg.APIKeys {
-		if k != "" {
-			p.apiKeys[k] = struct{}{}
+		if k.Key != "" {
+			p.apiKeys[k.Key] = k.Name
 		}
 	}
 	p.ttlDays.Store(int32(cfg.TTLDays))
@@ -655,9 +690,12 @@ func (p *Pool) Acquire(ctx context.Context) error {
 	return p.sem.Acquire(ctx)
 }
 
-// Release 释放并发上传名额
+// Release 释放并发上传名额，并记录一次"完成事件"用于 RPM 统计
 func (p *Pool) Release() {
 	p.sem.Release()
+	// 无锁写 ring：写指针原子递增，写入纳秒时间戳（0 表示空槽）
+	idx := p.rpmIdx.Add(1) & 1023
+	p.rpmBuf[idx] = time.Now().UnixNano()
 }
 
 // RequestTimeout 上传请求超时时长
@@ -978,13 +1016,13 @@ func (p *Pool) ValidateAPIKey(key string) bool {
 	return false
 }
 
-// AddAPIKey 注册新的 API Key
-func (p *Pool) AddAPIKey(key string) {
+// AddAPIKey 注册新的 API Key（name 可空）
+func (p *Pool) AddAPIKey(key, name string) {
 	if key == "" {
 		return
 	}
 	p.apiKeysMu.Lock()
-	p.apiKeys[key] = struct{}{}
+	p.apiKeys[key] = name
 	p.apiKeysMu.Unlock()
 }
 
@@ -995,13 +1033,24 @@ func (p *Pool) RemoveAPIKey(key string) {
 	p.apiKeysMu.Unlock()
 }
 
+// SetAPIKeyName 更新 API Key 的备注名（key 不存在返回 false）
+func (p *Pool) SetAPIKeyName(key, name string) bool {
+	p.apiKeysMu.Lock()
+	defer p.apiKeysMu.Unlock()
+	if _, ok := p.apiKeys[key]; !ok {
+		return false
+	}
+	p.apiKeys[key] = name
+	return true
+}
+
 // APIKeySnapshot 返回当前所有 API Key 的副本（管理页展示用）
-func (p *Pool) APIKeySnapshot() []string {
+func (p *Pool) APIKeySnapshot() []APIKey {
 	p.apiKeysMu.RLock()
 	defer p.apiKeysMu.RUnlock()
-	out := make([]string, 0, len(p.apiKeys))
-	for k := range p.apiKeys {
-		out = append(out, k)
+	out := make([]APIKey, 0, len(p.apiKeys))
+	for k, n := range p.apiKeys {
+		out = append(out, APIKey{Key: k, Name: n})
 	}
 	return out
 }
@@ -1045,6 +1094,26 @@ func (p *Pool) Stats() Stats {
 	} else {
 		s.SuccessRate = "-"
 	}
+
+	// 当前并发（直接读信号量 inUse，零成本）
+	s.InFlight = int(p.sem.inUse.Load())
+	s.MaxConcurrent = int(p.maxConcurrent.Load())
+
+	// RPM：遍历 ring 统计 60s 内完成数
+	cutoff := time.Now().Add(-60 * time.Second).UnixNano()
+	rpm := 0
+	for _, ts := range p.rpmBuf {
+		if ts > cutoff {
+			rpm++
+		}
+	}
+	s.RPM = rpm
+
+	// 进程堆分配 MB（runtime.ReadMemStats 不加锁，但会 STW 极短，开销可忽略）
+	var ms runtime.MemStats
+	runtime.ReadMemStats(&ms)
+	s.MemMB = int(ms.Alloc / 1024 / 1024)
+
 	return s
 }
 

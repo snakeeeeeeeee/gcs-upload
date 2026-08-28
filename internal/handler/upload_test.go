@@ -18,7 +18,7 @@ func TestUploadRejectsOversize(t *testing.T) {
 	p, err := pool.New(context.Background(), pool.Config{
 		AdminToken: "t",
 		MaxSize:    5, // 5 MB
-		APIKeys:    []string{"k1"},
+		APIKeys:    pool.APIKeyList{{Key: "k1"}},
 	})
 	if err != nil {
 		t.Fatal(err)

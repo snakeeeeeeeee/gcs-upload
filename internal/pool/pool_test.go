@@ -25,7 +25,7 @@ import (
 // fakePool 构造只有名字的假账号，仅测调度逻辑（默认标记为健康，老测试不需要显式探测）
 func fakePool(n int) *Pool {
 	p := &Pool{defaultBucket: "bkt",
-		apiKeys: make(map[string]struct{}), sem: newDynSem(2)}
+		apiKeys: make(map[string]string), sem: newDynSem(2)}
 	p.retry.Store(3)
 	for i := 0; i < n; i++ {
 		acc := &Account{Name: string(rune('a' + i)), Bucket: "bkt"}
@@ -196,7 +196,7 @@ func (a *Account) markHealth(ok bool) {
 func TestNextSkipsUntested(t *testing.T) {
 	// 自行构造不调 markHealth 的池（fakePool 默认健康）
 	p := &Pool{defaultBucket: "bkt",
-		apiKeys: make(map[string]struct{}), sem: newDynSem(2)}
+		apiKeys: make(map[string]string), sem: newDynSem(2)}
 	p.retry.Store(3)
 	for _, n := range []string{"a", "b"} {
 		acc := &Account{Name: n, Bucket: "bkt"}
@@ -236,8 +236,8 @@ func TestNextSkipsUntested(t *testing.T) {
 
 func TestAPIKeyLifecycle(t *testing.T) {
 	p := fakePool(1)
-	p.AddAPIKey("gcs-abc")
-	p.AddAPIKey("gcs-xyz")
+	p.AddAPIKey("gcs-abc", "client A")
+	p.AddAPIKey("gcs-xyz", "")
 	if !p.ValidateAPIKey("gcs-abc") {
 		t.Fatal("expected gcs-abc valid")
 	}
@@ -255,8 +255,8 @@ func TestAPIKeyLifecycle(t *testing.T) {
 		t.Fatal("expected invalid after remove")
 	}
 	got := p.APIKeySnapshot()
-	if len(got) != 1 || got[0] != "gcs-xyz" {
-		t.Fatalf("snapshot: %v", got)
+	if len(got) != 1 || got[0].Key != "gcs-xyz" || got[0].Name != "" {
+		t.Fatalf("snapshot: %+v", got)
 	}
 }
 

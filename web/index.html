@@ -96,6 +96,15 @@ tr:hover td{background:#1a1f28}
   <h1>gcs-pool 管理台</h1>
   <span class="sub" id="sysInfo">未连接</span>
   <div class="spacer"></div>
+  <select id="refreshSel" class="sm" title="自动刷新间隔" style="padding:3px 8px;font-size:12px">
+    <option value="5">5s</option>
+    <option value="10" selected>10s</option>
+    <option value="15">15s</option>
+    <option value="30">30s</option>
+    <option value="60">60s</option>
+    <option value="0">手动</option>
+  </select>
+  <button id="refreshBtn" class="sm">刷新</button>
   <button id="logoutBtn">退出</button>
 </div>
 
@@ -134,7 +143,6 @@ tr:hover td{background:#1a1f28}
       <h2 style="margin:0">号池管理</h2>
       <div class="spacer"></div>
       <button id="addAccBtn" class="primary sm">添加号</button>
-      <button id="refreshBtn" class="sm">刷新</button>
     </div>
     <div style="overflow-x:auto">
     <table>
@@ -155,7 +163,7 @@ tr:hover td{background:#1a1f28}
   </div>
   <div style="overflow-x:auto">
   <table>
-    <thead><tr><th>Key</th><th>操作</th></tr></thead>
+    <thead><tr><th>名称</th><th>Key</th><th>操作</th></tr></thead>
     <tbody id="apiKeyBody"></tbody>
   </table>
   </div>
@@ -184,7 +192,7 @@ tr:hover td{background:#1a1f28}
   <div style="margin-top:14px;border-top:1px solid var(--border);padding-top:12px">
     <div class="row">
       <label>生命周期</label>
-      <input type="text" id="lcTTL" placeholder="1,7,30" value="1,7,30" style="width:100px">
+      <input type="text" id="lcTTL" placeholder="7" value="7" style="width:100px">
       <button id="lcBtn" class="sm primary">应用到所有桶</button>
     </div>
     <div style="color:var(--dim);font-size:11.5px">给号池里所有 bucket 建立 {n}d/ 前缀到期删除规则（用有权限的号执行）</div>
@@ -224,15 +232,32 @@ tr:hover td{background:#1a1f28}
   </div>
 </div>
 
-<!-- API Key 生成后一次性显示 -->
+<!-- API Key 生成：先填名称（可选）再生成，生成后一次性显示 key -->
 <div class="modal-mask" id="keyModal">
   <div class="modal" style="width:520px">
-    <h3>新的 API Key（只显示这一次）</h3>
-    <div class="warn">⚠ 请立即复制保存。关闭后无法再查看完整值。</div>
-    <div class="key-display mono" id="newKeyText"></div>
-    <div class="actions">
+    <h3>生成新的 API Key</h3>
+    <label>用途 / 备注（可选，如"客户端A-手机端"）</label>
+    <input type="text" id="newKeyName" placeholder="便于识别，给谁用的就写啥">
+    <button id="keyGenBtn" class="primary" style="width:100%;margin-top:10px">生成</button>
+    <div class="warn hidden" id="keyWarn" style="margin-top:14px">⚠ 请立即复制保存。关闭后无法再查看完整值。</div>
+    <div class="key-display mono hidden" id="newKeyText" style="margin-top:8px"></div>
+    <div class="actions hidden" id="keyActions" style="margin-top:12px">
       <button id="keyCopyBtn">复制</button>
       <button id="keyCloseBtn" class="primary">关闭</button>
+    </div>
+  </div>
+</div>
+
+<!-- API Key 备注编辑（避免用浏览器原生 prompt） -->
+<div class="modal-mask" id="renameModal">
+  <div class="modal" style="width:420px">
+    <h3>编辑备注</h3>
+    <label>用途 / 备注（留空=清除备注）</label>
+    <input type="text" id="renameInput" placeholder="便于识别，给谁用的就写啥">
+    <div class="err-text" id="renameErr"></div>
+    <div class="actions">
+      <button id="renameCancelBtn">取消</button>
+      <button id="renameSaveBtn" class="primary">保存</button>
     </div>
   </div>
 </div>
@@ -262,6 +287,9 @@ function renderStats(st){
     ['健康',(st.health_ok||0)+'/'+(st.accounts||0),st.health_fail>0?'warn':'ok'],
     ['熔断中',st.circuit_open||0,st.circuit_open>0?'warn':'info'],
     ['成功率',st.success_rate||'-',st.success_rate==='-'?'dim':'ok'],
+    ['并发',(st.in_flight||0)+'/'+(st.max_concurrent||'-'),(st.in_flight||0)>0?'ok':'dim'],
+    ['RPM',st.rpm||0,(st.rpm||0)>0?'ok':'dim'],
+    ['内存',(st.mem_mb||0)+' MB','info'],
   ];
   $('#statsRow').innerHTML=items.map(([l,n,c])=>`<div class="stat"><div class="num ${c}">${n}</div><div class="lbl">${l}</div></div>`).join('');
 }
@@ -345,7 +373,7 @@ async function loadPool(){
     if(!$('#cfgMaxConcurrent').value){$('#cfgMaxConcurrent').value=d.max_concurrent;}
     if(!$('#cfgReqTimeout').value){$('#cfgReqTimeout').value=d.request_timeout;}
     if(!$('#cfgRetry').value){$('#cfgRetry').value=d.retry;}
-    if(!$('#lcTTL').value){$('#lcTTL').value='1,7,30';}
+    if(!$('#lcTTL').value){$('#lcTTL').value='7';}
   }catch(e){
     if(e.message!=='unauthorized')$('#sysInfo').textContent='加载失败';
   }
@@ -473,8 +501,17 @@ $('#refreshBtn').onclick=()=>{loadPool();loadRecords();toast('已刷新');};
 $('#recRefreshBtn').onclick=()=>loadRecords();
 
 /* 添加号（模态框） */
-function openAddModal(){$('#addName').value='';$('#addBucket').value='';$('#addKeyJSON').value='';$('#addErr').textContent='';$('#addModal').classList.add('show');$('#addName').focus();}
+function openAddModal(){$('#addName').value='';$('#addBucket').value='';$('#addKeyJSON').value='';$('#addErr').textContent='';$('#addModal').classList.add('show');$('#addKeyJSON').focus();}
 function closeAddModal(){$('#addModal').classList.remove('show');}
+/* 粘贴 SA Key JSON 自动识别 project_id 填入号名称（名称已手动填写时不覆盖） */
+$('#addKeyJSON').addEventListener('input',()=>{
+  const nameEl=$('#addName');
+  if(nameEl.value.trim()) return;               // 用户已填名称 → 不覆盖
+  try{
+    const j=JSON.parse($('#addKeyJSON').value.trim());
+    if(j&&typeof j.project_id==='string'&&j.project_id) nameEl.value=j.project_id;
+  }catch(e){/* 未粘贴完整/非法 JSON 时静默，粘贴完自动识别 */}
+});
 $('#addAccBtn').onclick=openAddModal;
 $('#addCancelBtn').onclick=closeAddModal;
 $('#addSubmitBtn').onclick=async()=>{
@@ -495,36 +532,71 @@ $('#addSubmitBtn').onclick=async()=>{
 $('#addModal').addEventListener('click',e=>{if(e.target.id==='addModal')closeAddModal();});
 
 /* API Keys */
+function keyLabel(k){
+  const short=`${k.key.slice(0,8)}…${k.key.slice(-4)}`;
+  return k.name?`${k.name} · ${short}`:short;
+}
 async function loadKeys(){
   try{
     const d=await api('/admin/api-keys');
     const keys=d.keys||[];
     renderKeys(keys);
     const sel=$('#keySelect'),cur=sel.value;
-    sel.innerHTML=keys.length?keys.map(k=>`<option value="${esc(k)}">${esc(k.slice(0,8))}...${esc(k.slice(-4))}</option>`).join(''):'<option value="">（先生成）</option>';
+    sel.innerHTML=keys.length?keys.map(k=>`<option value="${esc(k.key)}">${esc(keyLabel(k))}</option>`).join(''):'<option value="">（先生成）</option>';
     sel.value=cur;
   }catch(e){}
 }
 function renderKeys(keys){
   $('#apiKeyBody').innerHTML=keys.length?keys.map(k=>`<tr>
-    <td class="mono">${esc(k.slice(0,8))}…${esc(k.slice(-4))} <span style="color:var(--dim)">(${k.length} 字符)</span></td>
+    <td>${k.name?esc(k.name):'<span style="color:var(--dim)">（无备注）</span>'}</td>
+    <td class="mono">${esc(k.key.slice(0,8))}…${esc(k.key.slice(-4))} <span style="color:var(--dim)">(${k.key.length} 字符)</span></td>
     <td><div class="actions">
-      <button class="sm" onclick="copyText('${esc(k)}')">复制</button>
-      <button class="sm danger" onclick="delKey('${esc(k)}')">删除</button>
+      <button class="sm" onclick="renameKey('${esc(k.key)}','${esc(k.name||'')}')">备注</button>
+      <button class="sm" onclick="copyText('${esc(k.key)}')">复制</button>
+      <button class="sm danger" onclick="delKey('${esc(k.key)}')">删除</button>
     </div></td>
-  </tr>`).join(''):'<tr><td colspan="2" style="color:var(--dim)">暂无 API Key</td></tr>';
+  </tr>`).join(''):'<tr><td colspan="3" style="color:var(--dim)">暂无 API Key</td></tr>';
 }
 function copyText(t){copyToClipboard(t,'已复制');}
+/* 备注编辑：弹模态框，回调里 PUT 提交（避免用浏览器原生 prompt） */
+let _renameTarget=null;
+function renameKey(k,oldName){
+  _renameTarget=k;
+  $('#renameInput').value=oldName||'';
+  $('#renameErr').textContent='';
+  $('#renameModal').classList.add('show');
+  $('#renameInput').focus();$('#renameInput').select();
+}
+function closeRename(){$('#renameModal').classList.remove('show');_renameTarget=null;}
+$('#renameCancelBtn').onclick=closeRename;
+$('#renameModal').addEventListener('click',e=>{if(e.target.id==='renameModal')closeRename();});
+$('#renameInput').addEventListener('keydown',e=>{if(e.key==='Enter')$('#renameSaveBtn').click();if(e.key==='Escape')closeRename();});
+$('#renameSaveBtn').onclick=async()=>{
+  if(!_renameTarget)return;
+  const name=$('#renameInput').value.trim();
+  try{
+    await api('/admin/api-keys/'+encodeURIComponent(_renameTarget),{method:'PUT',body:JSON.stringify({name})});
+    closeRename();toast('备注已更新');loadKeys();
+  }catch(err){$('#renameErr').textContent=err.message;}
+};
 async function delKey(k){
   if(!confirm('确定删除该 API Key？'))return;
   try{await api('/admin/api-keys/'+encodeURIComponent(k),{method:'DELETE'});toast('已删除');loadKeys();}
   catch(err){toast(err.message);}
 }
-$('#genKeyBtn').onclick=async()=>{
+$('#genKeyBtn').onclick=()=>{
+  $('#newKeyName').value='';$('#newKeyText').textContent='';
+  $('#keyWarn').classList.add('hidden');$('#newKeyText').classList.add('hidden');$('#keyActions').classList.add('hidden');
+  $('#keyGenBtn').classList.remove('hidden');
+  $('#keyModal').classList.add('show');$('#newKeyName').focus();
+};
+$('#keyGenBtn').onclick=async()=>{
   try{
-    const d=await api('/admin/api-keys',{method:'POST'});
+    const name=$('#newKeyName').value.trim();
+    const d=await api('/admin/api-keys',{method:'POST',body:JSON.stringify({name})});
     $('#newKeyText').textContent=d.key;
-    $('#keyModal').classList.add('show');
+    $('#keyWarn').classList.remove('hidden');$('#newKeyText').classList.remove('hidden');$('#keyActions').classList.remove('hidden');
+    $('#keyGenBtn').classList.add('hidden');
     loadKeys();
   }catch(err){toast(err.message);}
 };
@@ -568,8 +640,21 @@ $('#cfgSaveBtn').onclick=async()=>{
   }catch(err){toast(err.message);}
 };
 
-/* 自动刷新 */
-setInterval(()=>{loadPool();loadRecords();loadKeys();},10000);
+/* 自动刷新（频率可调，关=纯手动；选择存 localStorage，刷新页面后保留） */
+let refreshTimer=null;
+function applyRefresh(sec){
+  if(refreshTimer){clearInterval(refreshTimer);refreshTimer=null;}
+  if(sec>0) refreshTimer=setInterval(()=>{loadPool();loadRecords();loadKeys();},sec*1000);
+}
+const _sel=$('#refreshSel');
+_sel.value=localStorage.getItem('gcs.refreshSec')||'10';
+_sel.onchange=()=>{
+  const v=_sel.value;
+  localStorage.setItem('gcs.refreshSec',v);
+  applyRefresh(+v);
+  toast(v==='0'?'已切换为手动刷新':'自动刷新 '+v+'s');
+};
+applyRefresh(+_sel.value);
 
 loadPool();loadRecords();loadKeys();
 </script>

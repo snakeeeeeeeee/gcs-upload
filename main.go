@@ -121,6 +121,7 @@ func main() {
 	mux.HandleFunc("GET /admin/api-keys", adm.Auth(adm.ListAPIKeys))
 	mux.HandleFunc("POST /admin/api-keys", adm.Auth(adm.CreateAPIKey))
 	mux.HandleFunc("DELETE /admin/api-keys/{key}", adm.Auth(adm.DeleteAPIKey))
+	mux.HandleFunc("PUT /admin/api-keys/{key}", adm.Auth(adm.UpdateAPIKeyName))
 
 	addr := cfg.Listen
 	if addr == "" {

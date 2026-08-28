@@ -500,16 +500,23 @@ func (h *Handler) ListAPIKeys(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"keys": h.pool.APIKeySnapshot()})
 }
 
-// CreateAPIKey POST /admin/api-keys  生成并返回明文（仅创建时一次性返回）
+// CreateAPIKey POST /admin/api-keys  body: {name?}
+// 生成并返回明文（仅创建时一次性返回）；name 可选，用于在管理页标注用途
 func (h *Handler) CreateAPIKey(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Name string `json:"name"`
+	}
+	_ = json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&req)
+	name := strings.TrimSpace(req.Name)
+
 	var b [16]byte
 	rand.Read(b[:])
 	key := "gcs-" + hex.EncodeToString(b[:])
-	h.pool.AddAPIKey(key)
+	h.pool.AddAPIKey(key, name)
 
 	h.mu.Lock()
 	err := h.updateConfig(func(cfg *pool.Config) {
-		cfg.APIKeys = append(cfg.APIKeys, key)
+		cfg.APIKeys = append(cfg.APIKeys, pool.APIKey{Key: key, Name: name})
 	})
 	h.mu.Unlock()
 	if err != nil {
@@ -517,8 +524,50 @@ func (h *Handler) CreateAPIKey(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "persist config: "+err.Error())
 		return
 	}
-	slog.Info("admin: api key created")
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "key": key})
+	slog.Info("admin: api key created", "name", name)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "key": key, "name": name})
+}
+
+// UpdateAPIKeyName PUT /admin/api-keys/{key}  body: {name}
+// 给已有 Key（含旧格式无备注的）补/改备注名
+func (h *Handler) UpdateAPIKeyName(w http.ResponseWriter, r *http.Request) {
+	raw := r.PathValue("key")
+	key, err := url.PathUnescape(raw)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid key")
+		return
+	}
+	var req struct {
+		Name string `json:"name"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid json: "+err.Error())
+		return
+	}
+	name := strings.TrimSpace(req.Name)
+	if len(name) > 200 {
+		writeErr(w, http.StatusBadRequest, "name too long (max 200)")
+		return
+	}
+	if !h.pool.SetAPIKeyName(key, name) {
+		writeErr(w, http.StatusNotFound, "key not found")
+		return
+	}
+	h.mu.Lock()
+	err = h.updateConfig(func(cfg *pool.Config) {
+		for i := range cfg.APIKeys {
+			if cfg.APIKeys[i].Key == key {
+				cfg.APIKeys[i].Name = name
+			}
+		}
+	})
+	h.mu.Unlock()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "persist config: "+err.Error())
+		return
+	}
+	slog.Info("admin: api key name updated", "key", key[:min(8, len(key))], "name", name)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "key": key, "name": name})
 }
 
 // DeleteAPIKey DELETE /admin/api-keys/{key}  key 走 URL path value，注意需做轻度解码
@@ -535,7 +584,7 @@ func (h *Handler) DeleteAPIKey(w http.ResponseWriter, r *http.Request) {
 	err = h.updateConfig(func(cfg *pool.Config) {
 		out := cfg.APIKeys[:0]
 		for _, k := range cfg.APIKeys {
-			if k != key {
+			if k.Key != key {
 				out = append(out, k)
 			}
 		}
