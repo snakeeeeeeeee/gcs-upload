@@ -165,9 +165,10 @@ type UploadResult struct {
 type NewReaderFunc func() (io.ReadCloser, error)
 
 // New 加载所有 key，构建号池。任一 key 加载失败则整体失败并清理已建 client。
+// 允许空号池启动（accounts 可为空数组）：可通过管理页添加号或 keys/ 目录自动扫描注册。
 func New(ctx context.Context, cfg Config) (*Pool, error) {
 	if len(cfg.Accounts) == 0 {
-		return nil, errors.New("pool: no accounts configured")
+		slog.Warn("pool: no accounts configured, starting with empty pool; add accounts via admin UI or drop key files into keys/ dir")
 	}
 	// admin_password（兼容旧字段 admin_token）必填，否则管理 API 裸奔
 	if cfg.AdminPassword == "" && cfg.AdminToken == "" {
@@ -305,7 +306,10 @@ func (p *Pool) probeFirstBucket(client *storage.Client, projectID string) (strin
 	if projectID == "" {
 		return "", errors.New("key missing project_id")
 	}
-	it := client.Buckets(context.Background(), projectID)
+	// 探测必须有超时：网络不通/权限不足时快速失败，避免卡死扫描器与添加号接口
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	it := client.Buckets(ctx, projectID)
 	var names []string
 	for {
 		attrs, err := it.Next()
@@ -463,7 +467,10 @@ func (p *Pool) UploadWith(ctx context.Context, object string, newReader NewReade
 	for attempts < p.retry && backoffs <= p.retry429Max {
 		acc := p.Next()
 		if acc == nil {
-			return nil, errors.New("pool: no available account (all disabled or cooling down)")
+			if p.AccountCount() == 0 {
+				return nil, errors.New("pool: no accounts configured, add one via admin UI or keys/ scan first")
+			}
+			return nil, errors.New("pool: no available account (all disabled, unhealthy, or cooling down)")
 		}
 		attempts++
 		tried = append(tried, acc.Name)

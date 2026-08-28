@@ -126,6 +126,9 @@ func main() {
 	if addr == "" {
 		addr = ":8080"
 	}
+	if p.AccountCount() == 0 {
+		slog.Warn("gcs-pool started with EMPTY pool — add accounts via admin UI (POST /admin/pool/accounts) or drop key files into keys/ dir")
+	}
 	slog.Info("gcs-pool started",
 		"addr", addr,
 		"accounts", p.AccountCount(),

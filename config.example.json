@@ -1,6 +1,6 @@
 {
   "listen": ":8080",
-  "default_bucket": "your-default-bucket",
+  "default_bucket": "",
   "max_size": 1024,
   "retry": 3,
   "max_concurrent": 1024,

@@ -254,15 +254,13 @@ func TestAPIKeyLifecycle(t *testing.T) {
 }
 
 func TestConfigValidation(t *testing.T) {
-	// 无账号
-	if _, err := New(t.Context(), Config{}); err == nil {
-		t.Fatal("expected error for empty accounts")
+	// 空号池允许启动（账号通过管理页/keys 扫描在线添加）
+	p, err := New(t.Context(), Config{AdminToken: "t"})
+	if err != nil {
+		t.Fatalf("expected empty pool to start, got: %v", err)
 	}
-	// 有账号但缺默认 bucket
-	if _, err := New(t.Context(), Config{AdminToken: "t", Accounts: []AccountConfig{{Name: "x", KeyFile: "nope.json"}}}); err == nil {
-		t.Fatal("expected error for missing default_bucket")
-	}
-	// 有账号有 bucket 但缺 admin_token
+	p.Close()
+	// 有账号但缺 admin_password/token
 	if _, err := New(t.Context(), Config{DefaultBucket: "b", Accounts: []AccountConfig{{Name: "x", KeyFile: "nope.json"}}}); err == nil {
 		t.Fatal("expected error for missing admin_token")
 	}
