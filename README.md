@@ -60,6 +60,21 @@ docker compose up -d --build
 
 启动后浏览器打开 `http://localhost:8090/`，会先跳到独立登录页 `http://localhost:8090/login`，输入 `admin_password` 进入管理台（httpOnly 会话 cookie，24h 有效，可退出）。
 
+### 辅助工具：SA Key 创建桶权限探测
+
+新号加入前可用 `tools/probe-create` 四步实测该 key 的权限全链路（创建 → 配 TTL → 上传 → 清理，跑完自动删除测试桶无残留）：
+
+```bash
+go run ./tools/probe-create keys/acc-3.json [location]   # location 默认 US
+# 输出示例：
+# [1/4] CREATE OK    bucket=gcs-pool-probe-xxx project=my-project location=US
+# [2/4] UPDATE OK    生命周期规则(7d) 已写入
+# [3/4] UPLOAD OK    probe.txt 上传成功 (创建者自动为 bucket owner)
+# [4/4] CLEANUP OK   测试桶已删除, 无残留
+```
+
+结论：四步全过 = 该 key 具备"自动创建桶"能力，程序 bucket 留空时可直接用（缺 `storage.buckets.create` 时会在 [1/4] 报 403，需到 GCP 控制台给 SA 授 `roles/storage.admin`）。
+
 ## 管理台（Web UI）
 
 内嵌单页（`go:embed`，暗色主题），独立登录页 `/login`，无需单独部署。功能：
