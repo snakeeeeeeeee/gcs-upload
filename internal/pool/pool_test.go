@@ -5,14 +5,19 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
+	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"cloud.google.com/go/storage"
 	"google.golang.org/api/googleapi"
+	"google.golang.org/api/option"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -267,5 +272,109 @@ func TestConfigValidation(t *testing.T) {
 	// key 文件不存在
 	if _, err := New(t.Context(), Config{AdminToken: "t", DefaultBucket: "b", Accounts: []AccountConfig{{Name: "x", KeyFile: "nope.json"}}}); err == nil {
 		t.Fatal("expected error for missing key file")
+	}
+}
+
+// ---------- 桶解析（新增：自动创建） ----------
+
+func TestResolveBucketPlan(t *testing.T) {
+	cases := []struct {
+		name      string
+		explicit  string
+		def       string
+		listed    []string
+		wantBkt   string
+		wantAuto  bool
+	}{
+		{"显式配置优先", "explicit-bkt", "def-bkt", []string{"z-bkt"}, "explicit-bkt", false},
+		{"显式空则用 default", "", "def-bkt", []string{"z-bkt"}, "def-bkt", false},
+		{"无显式无 default 取项目第一个(按名排序)", "", "", []string{"z-bkt", "a-bkt"}, "a-bkt", false},
+		{"无任何桶则自动创建", "", "", nil, "", true},
+		{"显式空列表也自动创建", "", "", []string{}, "", true},
+	}
+	for _, c := range cases {
+		bkt, auto := resolveBucketPlan(c.explicit, c.def, c.listed)
+		if bkt != c.wantBkt || auto != c.wantAuto {
+			t.Fatalf("%s: got (%q, %v) want (%q, %v)", c.name, bkt, auto, c.wantBkt, c.wantAuto)
+		}
+	}
+}
+
+func TestGenBucketName(t *testing.T) {
+	names := map[string]bool{}
+	for i := 0; i < 100; i++ {
+		n := genBucketName("project-123")
+		if len(n) < 3 || len(n) > 63 {
+			t.Fatalf("bucket name length out of range: %q (%d)", n, len(n))
+		}
+		for _, r := range n {
+			if !(r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '-') {
+				t.Fatalf("bucket name has invalid char %q in %q", r, n)
+			}
+		}
+		if names[n] {
+			t.Fatalf("duplicate bucket name: %q", n)
+		}
+		names[n] = true
+	}
+}
+
+// TestAutoCreateBucketIntegration 真实创建桶的集成测试：
+// 设置 GCS_PROBE_KEY=<key 文件路径> 且网络可达时执行（自动创建→验证→删除，无残留）。
+func TestAutoCreateBucketIntegration(t *testing.T) {
+	keyFile := os.Getenv("GCS_PROBE_KEY")
+	if keyFile == "" {
+		t.Skip("set GCS_PROBE_KEY=<sa key json> to run real create test")
+	}
+	cred, err := os.ReadFile(keyFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var kj struct{ ProjectID string `json:"project_id"` }
+	if err := json.Unmarshal(cred, &kj); err != nil {
+		t.Fatal(err)
+	}
+	client, err := storage.NewClient(context.Background(), option.WithCredentialsFile(keyFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	p := &Pool{bucketLocation: "US", ttlDays: atomic.Int32{}}
+	p.ttlDays.Store(7)
+	name, err := p.autoCreateBucket(client, kj.ProjectID, "itest")
+	if err != nil {
+		t.Fatalf("autoCreateBucket: %v", err)
+	}
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		if err := client.Bucket(name).Delete(ctx); err != nil {
+			t.Logf("cleanup delete failed (manual cleanup %s): %v", name, err)
+		}
+	}()
+	t.Logf("auto-created %s for project %s", name, kj.ProjectID)
+
+	// 验证创建者能写对象（owner 语义）
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	w := client.Bucket(name).Object("probe.txt").NewWriter(ctx)
+	if _, err := w.Write([]byte("x")); err != nil {
+		t.Fatalf("write to auto-created bucket: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("close writer: %v", err)
+	}
+	// 验证 TTL 生命周期规则已带
+	attrs, err := client.Bucket(name).Attrs(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(attrs.Lifecycle.Rules) != 1 || attrs.Lifecycle.Rules[0].Condition.AgeInDays != 7 {
+		t.Fatalf("lifecycle rules: %+v, want one 7d rule", attrs.Lifecycle.Rules)
+	}
+	// 清理对象
+	if err := client.Bucket(name).Object("probe.txt").Delete(ctx); err != nil {
+		t.Logf("cleanup object failed: %v", err)
 	}
 }

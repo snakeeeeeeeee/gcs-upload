@@ -19,7 +19,7 @@
 | 字段 | 说明                                                                |
 |---|-------------------------------------------------------------------|
 | `listen` | 监听地址，默认 `:11223`                                                  |
-| `default_bucket` | 默认 bucket（**可选**），未配 bucket 的号用它；留空则自动探测项目第一个桶                    |
+| `default_bucket` | 默认 bucket（**可选**），未配 bucket 的号用它；留空则自动用项目第一个桶，项目没桶则**自动创建**        |
 | `max_size` | 单文件上限（**MB**），默认 1024（1GB）                                        |
 | `retry` | 普通失败换号重试次数，默认 3                                                   |
 | `max_concurrent` | 全局并发上传上限，超限排队，默认 1024                                             |
@@ -27,12 +27,14 @@
 | `retry_429_base` | GCS 限流（429）退避基础秒数，指数增长，默认 1                                       |
 | `retry_429_max` | 429 最大退避次数，默认 5                                                   |
 | `signed_url_ttl` | 返回签名 URL 有效期（秒），默认 604800（7 天，v4 官方上限）；`<=0` 返回原生地址（需 bucket 公开读） |
+| `ttl_days` | 全局存储期限（天），默认 7，所有号统一；到期自动删除，客户不可改；`<=0` 永久存储                 |
+| `bucket_location` | 自动创建桶的区域，默认 `US`（如 `asia-east1`、`europe-west1`）                    |
 | `health_check_interval` | 健康检查间隔（秒），默认 300（5 分钟），后台定期探活每个 key；`0` 关闭                        |
 | `keys_scan_interval` | keys/ 目录自动扫描间隔（秒），默认 60，丢进目录的新 key JSON 自动注册上线                    |
 | `admin_password` | 管理登录密码（必填），登录页使用（兼容旧字段 `admin_token`）                             |
 | `api_keys` | 客户端 API Key 列表（`Authorization: Bearer <key>` 调 `/upload`），管理页可生成/删除          |
 | `accounts[].key_file` | SA key JSON 路径（必填，相对 config 目录解析）                                 |
-| `accounts[].bucket` | 可选，覆盖默认 bucket（每个号可绑自己的 bucket）                                   |
+| `accounts[].bucket` | 可选，覆盖默认 bucket（每个号可绑自己的 bucket；留空走默认/自动逻辑）                     |
 | `accounts[].name` | 可选，号名（日志用）                                                        |
 | `accounts[].enabled` | 可选，初始是否禁用（默认启用，管理页可切换）                                            |
 
@@ -63,7 +65,7 @@ docker compose up -d --build
 内嵌单页（`go:embed`，暗色主题），独立登录页 `/login`，无需单独部署。功能：
 
 - **上传测试**：拖拽上传 + 进度条 + 结果卡片（URL 一键复制），选择 API Key 模拟客户端，可**指定号/指定 bucket** 诊断单个 key
-- **号池管理**：查看每个号的状态（在线/熔断/禁用）与**主动健康监测**（后台定期探活每个 key，正常/异常/未测徽章 + 最近检查时间 + 错误详情）、上传/失败计数、最近错误；**添加号**（模态框填名称 + 粘贴 key JSON + 可选 bucket，热加载不重启）、移除、启用/禁用
+- **号池管理**：查看每个号的状态（在线/熔断/禁用）与**主动健康监测**（后台定期探活每个 key，正常/异常/未测徽章 + 最近检查时间 + 错误详情）、上传/失败计数、最近错误，**每行显示实际使用的 bucket**（自动创建的带 ⚡ 标记）；**添加号**（模态框填名称 + 粘贴 key JSON + 可选 bucket，留空=自动用项目第一个桶/无则自动创建，热加载不重启）、移除、启用/禁用
 - **API Keys**：生成/复制/删除客户端 API Key（`gcs-` 前缀），上传接口鉴权用
 - **统计**：账号数/启用数/熔断数/总上传/成功率 + 每号用量分布
 - **上传记录**：最近 10 条（成功/失败、尝试链、错误原因）
@@ -241,12 +243,12 @@ curl http://localhost:8080/healthz
 - **429 退避**：GCS 限流（HTTP 429 / gRPC ResourceExhausted）时指数退避（1s, 2s, 4s...），最多 `retry_429_max` 次后放弃，不消耗普通重试次数
 - **签名 URL**：上传成功后用该号私钥生成 v4 签名 URL（默认 7 天），私有 bucket 无需开公开读；`signed_url_ttl<=0` 时回退为原生地址
 - **健康监测**：后台按 `health_check_interval` 定期探活每个 key（列对象验证连通+权限，空桶也算健康），结果实时展示在管理页；探活需要 `storage.objects.list` 权限，失败会显示具体错误
-- **keys 目录自动扫描**：后台按 `keys_scan_interval` 扫描 `keys/` 目录，发现新 key JSON 自动注册上线（校验 → 落盘 → 进池 → 写回 config），已注册的跳过；bucket 走三级解析，解析失败会跳过并在日志说明原因
+- **keys 目录自动扫描**：后台按 `keys_scan_interval` 扫描 `keys/` 目录，发现新 key JSON 自动注册上线（校验 → 落盘 → 进池 → 写回 config），已注册的跳过；bucket 走四级解析，解析失败会跳过并在日志说明原因
 - **并发限流**：全局信号量限制并发上传（默认 1024，可配），超出排队；排队长过 `request_timeout` 返回 503
 - **请求超时**：整个上传受 `request_timeout` 约束（默认 30 分钟），超时中止
 - **热插拔 + 持久化**：管理页添加/移除/启停号即时生效，同时写回 `config.json`（key 落盘 `keys/`，原子写防并发），重启保持
 - **key 路径**：`key_file` 相对路径按 config.json 所在目录解析，迁移整个目录即可
-- **bucket 三级解析**：每个号的 bucket 按「号级 `accounts[].bucket` → `default_bucket` → 自动探测项目第一个桶」取优先级，未配置时自动探测（需要 SA 有 `storage.buckets.list` 权限，否则启动报错并提示）
+- **bucket 四级解析（自动创建）**：每个号的 bucket 按「号级 `accounts[].bucket` → `default_bucket` → 项目第一个桶（按名排序）→ **自动创建**」取优先级。**只给 SA 授 `roles/storage.admin`（Storage Admin）即可，有桶自动用第一个、没桶自动建一个**（创建者自动成为 bucket owner，无需再授权；创建时直接套用全局 `ttl_days` 生命周期规则）。管理页号池表格用 ⚡ 标记自动创建的桶
 - **日志**：实时输出到 console（stderr），不写文件；失败重试/退避/熔断均有告警
 
 ## 注意事项

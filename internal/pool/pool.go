@@ -11,12 +11,15 @@ package pool
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"log/slog"
+	"net/http"
 	"net/url"
 	"os"
 	"sort"
@@ -71,17 +74,19 @@ type Config struct {
 	TTLDays         int             `json:"ttl_days"`              // 存储期限（天），默认 7；全部文件到期自动删除，客户不可改；<=0 永久存储
 	HealthInterval  int             `json:"health_check_interval"` // 健康检查间隔（秒），默认 300（5 分钟）；0 关闭
 	ScanInterval    int             `json:"keys_scan_interval"`    // keys/ 目录自动扫描间隔（秒），默认 60；0 关闭
+	BucketLocation  string          `json:"bucket_location"`       // 自动创建桶的区域（默认 "US"）
 	APIKeys         []string        `json:"api_keys"`               // 客户端 API Key 列表（Authorization: Bearer <key>）
 	Accounts        []AccountConfig `json:"accounts"`              // 号池
 }
 
 // Account 运行时的"号"
 type Account struct {
-	Name    string
-	Client  *storage.Client
-	Bucket  string
-	KeyFile string
-	Enabled atomic.Bool
+	Name       string
+	Client     *storage.Client
+	Bucket     string
+	BucketAuto bool // 桶是程序自动创建的
+	KeyFile    string
+	Enabled    atomic.Bool
 
 	saEmail string // 签名 URL 用：service account email
 	saKey   []byte // 签名 URL 用：private key PEM
@@ -101,10 +106,11 @@ type Account struct {
 
 // State 管理页展示用的号状态
 type State struct {
-	Name      string `json:"name"`
-	KeyFile   string `json:"key_file"`
-	Bucket    string `json:"bucket"`
-	Enabled   bool   `json:"enabled"`
+	Name       string `json:"name"`
+	KeyFile    string `json:"key_file"`
+	Bucket     string `json:"bucket"`
+	BucketAuto bool   `json:"bucket_auto,omitempty"` // 桶是程序自动创建的
+	Enabled    bool   `json:"enabled"`
 	Circuit   bool   `json:"circuit"`
 	CoolTill  int64  `json:"cool_till"`
 	Uploads   int64  `json:"uploads"`
@@ -133,6 +139,7 @@ type Pool struct {
 	mu             sync.RWMutex
 	accounts       []*Account
 	defaultBucket  string
+	bucketLocation string
 	maxSize        int64
 	retry          int
 	circuitThresh  int
@@ -206,9 +213,13 @@ func New(ctx context.Context, cfg Config) (*Pool, error) {
 	if cfg.HealthInterval <= 0 {
 		cfg.HealthInterval = int(defaultHealthInterval.Seconds())
 	}
+	if cfg.BucketLocation == "" {
+		cfg.BucketLocation = "US"
+	}
 
 	p := &Pool{
 		defaultBucket:  cfg.DefaultBucket,
+		bucketLocation: cfg.BucketLocation,
 		maxSize:        cfg.MaxSize * 1024 * 1024, // MB → 字节
 		retry:          cfg.Retry,
 		circuitThresh:  defaultCircuit,
@@ -278,33 +289,69 @@ func (p *Pool) buildAccount(name, keyFile, bucket string, cred []byte) (*Account
 	}
 	json.Unmarshal(cred, &kj)
 
-	// bucket 三级解析：号级配置 → default_bucket → 自动探测项目第一个桶
+	// bucket 解析：号级配置 → default_bucket → 项目第一个桶 → 自动创建
+	// （自动创建后创建者即 owner，上传/配 TTL/删除都无需额外授权）
+	bucketAuto := false
 	if bucket == "" {
 		bucket = p.defaultBucket
 	}
 	if bucket == "" {
-		probed, err := p.probeFirstBucket(client, kj.ProjectID)
+		names, err := p.listProjectBuckets(client, kj.ProjectID)
 		if err != nil {
-			client.Close()
-			return nil, fmt.Errorf(
-				"pool: auto-detect bucket for %s failed: %w (hint: give the SA storage.buckets.list permission, or set bucket/default_bucket in config)",
-				name, err)
+			// list 失败（无权限/网络）→ 直接尝试自动创建（create 权限可能独立存在）
+			created, cerr := p.autoCreateBucket(client, kj.ProjectID, name)
+			if cerr != nil {
+				client.Close()
+				return nil, fmt.Errorf(
+					"pool: resolve bucket for %s: list failed: %v; auto-create failed: %v (hint: grant the SA Storage Admin roles/storage.admin, or set bucket/default_bucket in config)",
+					name, err, cerr)
+			}
+			bucket, bucketAuto = created, true
+		} else {
+			bkt, needCreate := resolveBucketPlan("", "", names)
+			if needCreate {
+				created, cerr := p.autoCreateBucket(client, kj.ProjectID, name)
+				if cerr != nil {
+					client.Close()
+					return nil, fmt.Errorf(
+						"pool: no bucket in project %s and auto-create failed: %v (hint: grant the SA storage.buckets.create / Storage Admin roles/storage.admin)",
+						kj.ProjectID, cerr)
+				}
+				bucket, bucketAuto = created, true
+			} else {
+				bucket = bkt
+				slog.Info("pool: auto-detected bucket", "name", name, "bucket", bucket)
+			}
 		}
-		bucket = probed
-		slog.Info("pool: auto-detected bucket", "name", name, "bucket", bucket)
 	}
 
-	acc := &Account{Name: name, Client: client, Bucket: bucket, KeyFile: keyFile,
+	acc := &Account{Name: name, Client: client, Bucket: bucket, BucketAuto: bucketAuto, KeyFile: keyFile,
 		saEmail: kj.ClientEmail, saKey: []byte(kj.PrivateKey),
 		thresh: p.circuitThresh, coolDown: p.coolDown}
 	acc.Enabled.Store(true)
 	return acc, nil
 }
 
-// probeFirstBucket 列出项目下所有 bucket，按名称排序取第一个（需要 storage.buckets.list 权限）
-func (p *Pool) probeFirstBucket(client *storage.Client, projectID string) (string, error) {
+// resolveBucketPlan 桶选择优先级（纯逻辑，便于单测）：
+// 显式配置 > default_bucket > 项目第一个桶（按名排序） > 自动创建
+func resolveBucketPlan(explicit, def string, listed []string) (bucket string, autoCreate bool) {
+	if explicit != "" {
+		return explicit, false
+	}
+	if def != "" {
+		return def, false
+	}
+	if len(listed) > 0 {
+		sort.Strings(listed)
+		return listed[0], false
+	}
+	return "", true
+}
+
+// listProjectBuckets 列出项目下所有 bucket 名（需要 storage.buckets.list 权限）
+func (p *Pool) listProjectBuckets(client *storage.Client, projectID string) ([]string, error) {
 	if projectID == "" {
-		return "", errors.New("key missing project_id")
+		return nil, errors.New("key missing project_id")
 	}
 	// 探测必须有超时：网络不通/权限不足时快速失败，避免卡死扫描器与添加号接口
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -317,15 +364,58 @@ func (p *Pool) probeFirstBucket(client *storage.Client, projectID string) (strin
 			break
 		}
 		if err != nil {
-			return "", err
+			return nil, err
 		}
 		names = append(names, attrs.Name)
 	}
-	if len(names) == 0 {
-		return "", errors.New("no buckets found in project")
+	return names, nil
+}
+
+// autoCreateBucket 项目下没有任何桶（或 list 无权限）时自动创建一个，
+// 并直接套用全局 TTL 生命周期规则（ttl_days > 0 时）。
+// 桶名全局唯一，极小概率撞名（409）时自动换名重试，最多 3 次。
+func (p *Pool) autoCreateBucket(client *storage.Client, projectID, accountName string) (string, error) {
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		name := genBucketName(projectID)
+		attrs := &storage.BucketAttrs{Location: p.bucketLocation}
+		if ttl := p.ttlDays.Load(); ttl > 0 {
+			attrs.Lifecycle = storage.Lifecycle{Rules: []storage.LifecycleRule{
+				{Action: storage.LifecycleAction{Type: storage.DeleteAction}, Condition: storage.LifecycleCondition{AgeInDays: int64(ttl)}},
+			}}
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		err := client.Bucket(name).Create(ctx, projectID, attrs)
+		cancel()
+		if err == nil {
+			slog.Info("pool: auto-created bucket", "account", accountName, "bucket", name, "location", p.bucketLocation, "ttl_days", p.ttlDays.Load())
+			return name, nil
+		}
+		lastErr = err
+		if !isAlreadyExists(err) {
+			return "", fmt.Errorf("create bucket %s: %w", name, err)
+		}
+		slog.Warn("pool: bucket name collision, retrying", "name", name, "attempt", attempt+1)
 	}
-	sort.Strings(names)
-	return names[0], nil
+	return "", fmt.Errorf("create bucket: %w", lastErr)
+}
+
+func isAlreadyExists(err error) bool {
+	var gerr *googleapi.Error
+	return errors.As(err, &gerr) && gerr.Code == http.StatusConflict
+}
+
+// genBucketName 生成全局唯一的桶名：gcs-pool-<project hash>-<随机>
+// GCS 桶名规则：3-63 字符，小写字母/数字/连字符，不能以 goog 开头，不能以 - 结尾
+func genBucketName(projectID string) string {
+	h := fnv.New32a()
+	h.Write([]byte(projectID))
+	var b [4]byte
+	if _, err := rand.Read(b[:]); err == nil {
+		return fmt.Sprintf("gcs-pool-%x-%x", h.Sum32(), b)
+	}
+	// 熵源异常时兜底：时间戳（并发撞名概率升高，但 autoCreateBucket 会换名重试）
+	return fmt.Sprintf("gcs-pool-%x-%x", h.Sum32(), time.Now().UnixNano()&0xFFFFFF)
 }
 
 // signURL 生成 v4 签名 URL（私有 bucket 也能匿名访问）
@@ -898,10 +988,11 @@ func (a *Account) State() State {
 		}
 	}
 	return State{
-		Name:      a.Name,
-		KeyFile:   a.KeyFile,
-		Bucket:    a.Bucket,
-		Enabled:   a.Enabled.Load(),
+		Name:       a.Name,
+		KeyFile:    a.KeyFile,
+		Bucket:     a.Bucket,
+		BucketAuto: a.BucketAuto,
+		Enabled:    a.Enabled.Load(),
 		Circuit:   a.circuit.Load(),
 		CoolTill:  a.coolTill.Load(),
 		Uploads:   a.uploads.Load(),

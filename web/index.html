@@ -195,8 +195,8 @@ tr:hover td{background:#1a1f28}
     <h3>添加号</h3>
     <label>号名称（唯一标识，如 acc-4）</label>
     <input type="text" id="addName" placeholder="acc-4">
-    <label>bucket（可选，留空走 default_bucket 或自动探测）</label>
-    <input type="text" id="addBucket" placeholder="可选">
+    <label>bucket（可选，留空=自动：用项目第一个桶，没有则自动创建）</label>
+    <input type="text" id="addBucket" placeholder="留空自动处理">
     <label>SA Key JSON 内容</label>
     <textarea id="addKeyJSON" placeholder="粘贴 keys/acc-4.json 的完整内容..."></textarea>
     <div class="err-text" id="addErr"></div>
@@ -273,7 +273,7 @@ function renderPool(data){
     const herr=a.health_error?`<div style="color:var(--red);font-size:11px;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(a.health_error)}">${esc(a.health_error)}</div>`:'';
     return `<tr>
       <td class="mono">${esc(a.name)}</td>
-      <td class="mono">${esc(a.bucket)}</td>
+      <td class="mono">${esc(a.bucket)}${a.bucket_auto?' <span style="color:var(--warn,orange);cursor:help" title="程序自动创建">⚡</span>':''}</td>
       <td>${healthBadge(a)}${hat?'<div style="color:var(--dim);font-size:11px">'+hat+'</div>':''}${herr}</td>
       <td>${badge(a)}${cool?'<div style="color:var(--dim);font-size:11px">'+cool+'</div>':''}</td>
       <td class="mono">${a.uploads} / <span style="color:${a.failures>0?'var(--red)':'var(--dim)'}">${a.failures}</span></td>
@@ -463,8 +463,9 @@ $('#addSubmitBtn').onclick=async()=>{
   if(!keyJSON){$('#addErr').textContent='请粘贴 SA Key JSON';return;}
   try{
     JSON.parse(keyJSON);
-    await api('/admin/pool/accounts',{method:'POST',body:JSON.stringify({name:n,bucket,key_json:keyJSON})});
-    toast('已添加 '+n);
+    const res=await api('/admin/pool/accounts',{method:'POST',body:JSON.stringify({name:n,bucket,key_json:keyJSON})});
+    const acc=res&&res.account;
+    toast(acc&&acc.bucket_auto?('已添加 '+n+'，自动创建桶 '+acc.bucket):('已添加 '+n));
     closeAddModal();
     loadPool();
   }catch(err){$('#addErr').textContent=err.message;}

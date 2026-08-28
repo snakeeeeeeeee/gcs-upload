@@ -9,6 +9,7 @@
   "retry_429_max": 5,
   "signed_url_ttl": 604800,
   "ttl_days": 7,
+  "bucket_location": "US",
   "health_check_interval": 300,
   "keys_scan_interval": 60,
   "api_keys": [],
