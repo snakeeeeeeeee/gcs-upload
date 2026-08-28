@@ -14,18 +14,5 @@
   "api_keys": [],
   "admin_password": "change-me-to-a-strong-password",
   "accounts": [
-    {
-      "name": "acc-1",
-      "key_file": "keys/acc-1.json"
-    },
-    {
-      "name": "acc-2",
-      "key_file": "keys/acc-2.json",
-      "bucket": "acc-2-special-bucket"
-    },
-    {
-      "name": "acc-3",
-      "key_file": "keys/acc-3.json"
-    }
   ]
 }
