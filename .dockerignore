@@ -1,0 +1,10 @@
+# 敏感与构建产物不入镜像
+config.json
+keys/
+*.log
+gcs-pool
+.git
+.workbuddy/
+Dockerfile
+docker-compose.yml
+.dockerignore

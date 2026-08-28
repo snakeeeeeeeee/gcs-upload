@@ -1,0 +1,13 @@
+# ---- 敏感配置与凭证（绝不入库） ----
+config.json
+config.json.bak
+keys/
+
+# ---- 构建产物与日志 ----
+gcs-pool
+*.log
+
+# ---- 本地工具 ----
+.workbuddy/
+.DS_Store
+.idea/

@@ -1,0 +1,486 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>gcs-pool 管理台</title>
+<style>
+:root{
+  --bg:#0f1115; --card:#171b22; --card2:#1d222b; --border:#2a303b;
+  --text:#e6e9ef; --muted:#9aa3b2; --dim:#6b7382;
+  --teal:#3ecf9e; --blue:#4a9eff; --amber:#e8a23c; --red:#e2574a; --gray:#8b93a3;
+  --mono:ui-monospace,SFMono-Regular,Menlo,monospace;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--text);font:13px/1.6 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif;padding:20px}
+h1{font-size:17px;font-weight:600;letter-spacing:.3px}
+h2{font-size:14px;font-weight:600;margin-bottom:12px}
+.card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:16px}
+.header{display:flex;align-items:center;gap:12px;margin-bottom:16px;flex-wrap:wrap}
+.header .sub{color:var(--dim);font-size:12px}
+.spacer{flex:1}
+input,select{background:var(--card2);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:7px 10px;font-size:13px;outline:none}
+input:focus,select:focus{border-color:var(--blue)}
+button{background:#232a36;border:1px solid var(--border);color:var(--text);border-radius:8px;padding:7px 14px;font-size:13px;cursor:pointer;transition:background .15s}
+button:hover{background:#2d3545}
+button.primary{background:#1f6feb;border-color:#1f6feb}
+button.primary:hover{background:#2a7bf5}
+button.danger{background:#3a2020;border-color:#5a2c2c;color:#f0b9b4}
+button.danger:hover{background:#4a2828}
+button.sm{padding:3px 9px;font-size:12px}
+button:disabled{opacity:.45;cursor:not-allowed}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;margin-bottom:16px}
+.stat{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:12px 14px}
+.stat .num{font-size:22px;font-weight:600;font-family:var(--mono)}
+.stat .lbl{color:var(--dim);font-size:12px;margin-top:2px}
+.stat .num.ok{color:var(--teal)} .stat .num.warn{color:var(--amber)} .stat .num.bad{color:var(--red)} .stat .num.info{color:var(--blue)}
+.grid{display:grid;grid-template-columns:1fr 1.4fr;gap:16px;margin-bottom:16px}
+@media(max-width:1000px){.grid{grid-template-columns:1fr}}
+.drop{border:1.5px dashed var(--border);border-radius:10px;padding:26px;text-align:center;color:var(--dim);cursor:pointer;transition:all .15s;margin-bottom:12px}
+.drop:hover,.drop.drag{border-color:var(--blue);background:#18202b;color:var(--text)}
+.drop .fn{color:var(--text);font-size:13px;word-break:break-all}
+.row{display:flex;gap:10px;margin:10px 0;align-items:center;flex-wrap:wrap}
+.row label{color:var(--muted);font-size:12px;white-space:nowrap}
+.bar{height:6px;background:var(--card2);border-radius:3px;overflow:hidden;margin:10px 0}
+.bar>div{height:100%;width:0;background:var(--blue);transition:width .2s}
+.result{background:var(--card2);border:1px solid var(--border);border-radius:10px;padding:12px;margin-top:10px;display:none}
+.result.ok{border-color:#1e5c46;display:block}
+.result.err{border-color:#5c2e2a;display:block}
+.result .url{font-family:var(--mono);font-size:12px;color:var(--teal);word-break:break-all;background:#0e1a16;border:1px solid #1e3a30;border-radius:6px;padding:8px;margin:6px 0;display:flex;align-items:center;gap:8px;justify-content:space-between}
+.result .url button{flex-shrink:0}
+.kv{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:6px;margin-top:8px;font-size:12px}
+.kv span{color:var(--dim)} .kv b{font-weight:500;font-family:var(--mono)}
+table{width:100%;border-collapse:collapse;font-size:12.5px}
+th{color:var(--muted);text-align:left;font-weight:500;padding:7px 8px;border-bottom:1px solid var(--border);white-space:nowrap}
+td{padding:7px 8px;border-bottom:1px solid #20252e;vertical-align:middle;word-break:break-all}
+tr:hover td{background:#1a1f28}
+.badge{display:inline-block;padding:1px 8px;border-radius:20px;font-size:11.5px;white-space:nowrap}
+.badge.on{background:#0f2b21;color:var(--teal);border:1px solid #1e5c46}
+.badge.circuit{background:#33240f;color:var(--amber);border:1px solid #5c421e}
+.badge.off{background:#262a33;color:var(--gray);border:1px solid #3a4050}
+.badge.ok{background:#0f2b21;color:var(--teal);border:1px solid #1e5c46}
+.badge.fail{background:#33201e;color:var(--red);border:1px solid #5c2e2a}
+.actions{display:flex;gap:6px;white-space:nowrap}
+.mono{font-family:var(--mono);font-size:12px}
+.err-text{color:var(--red);font-size:12px;margin-top:6px;word-break:break-all}
+.toolbar{display:flex;gap:10px;margin-bottom:10px;align-items:center;flex-wrap:wrap}
+.toolbar .spacer{flex:1}
+.msg{position:fixed;right:16px;bottom:16px;background:var(--card2);border:1px solid var(--border);color:var(--text);padding:10px 16px;border-radius:10px;font-size:13px;display:none;z-index:99}
+.bar-dist{display:flex;align-items:center;gap:8px;margin:4px 0;font-size:12px}
+.bar-dist .lbl{width:90px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.bar-dist .track{flex:1;height:14px;background:var(--card2);border-radius:4px;overflow:hidden}
+.bar-dist .fill{height:100%;background:var(--blue);border-radius:4px}
+.bar-dist .cnt{width:60px;text-align:right;color:var(--muted);font-family:var(--mono)}
+#loginBtn{background:transparent;border-color:var(--border)}
+#loginBtn.active{background:#0f2b21;border-color:#1e5c46;color:var(--teal)}
+.modal-mask{position:fixed;inset:0;background:rgba(0,0,0,0.6);display:none;align-items:center;justify-content:center;z-index:100}
+.modal-mask.show{display:flex}
+.modal{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:20px;width:440px;max-width:92vw;max-height:90vh;overflow:auto}
+.modal h3{margin-bottom:14px;font-size:15px;font-weight:600}
+.modal label{display:block;color:var(--muted);font-size:12px;margin:10px 0 4px}
+.modal input,.modal textarea{width:100%;background:var(--card2);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:7px 10px;font-size:13px;outline:none;font-family:inherit}
+.modal input:focus,.modal textarea:focus{border-color:var(--blue)}
+.modal textarea{font-family:var(--mono);min-height:130px;resize:vertical}
+.modal .err-text{min-height:18px;margin:6px 0}
+.modal .actions{display:flex;gap:8px;justify-content:flex-end;margin-top:16px}
+.modal .key-display{background:#0e1a16;border:1px solid #1e3a30;border-radius:8px;padding:12px;word-break:break-all;font-size:13px;color:var(--teal)}
+.modal .warn{color:var(--amber);font-size:12px;margin-bottom:10px}
+.hidden{display:none!important}
+</style>
+</head>
+<body>
+
+<div class="msg" id="msg"></div>
+
+<div class="header">
+  <h1>gcs-pool 管理台</h1>
+  <span class="sub" id="sysInfo">未连接</span>
+  <div class="spacer"></div>
+  <button id="logoutBtn">退出</button>
+</div>
+
+<div class="stats" id="statsRow"></div>
+
+<div class="grid">
+  <div>
+    <div class="card" style="margin-bottom:16px">
+      <h2>上传测试</h2>
+      <div class="drop" id="drop">
+        <div id="dropHint">点击选择文件，或拖拽到此处</div>
+        <div class="fn hidden" id="fileName"></div>
+      </div>
+      <input type="file" id="fileInput" class="hidden">
+      <div class="row">
+        <label>API Key</label>
+        <select id="keySelect"><option value="">（先生成）</option></select>
+        <label>指定号</label>
+        <select id="accSelect"><option value="">自动轮询</option></select>
+        <label>指定 bucket</label>
+        <input type="text" id="bucketInput" placeholder="默认 bucket" style="width:180px">
+      </div>
+      <button class="primary" id="uploadBtn" style="width:100%">上传</button>
+      <div class="bar hidden" id="progressBar"><div id="progressFill"></div></div>
+      <div class="result" id="uploadResult"></div>
+    </div>
+
+    <div class="card">
+      <h2>号池统计分布</h2>
+      <div id="dist"></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="toolbar">
+      <h2 style="margin:0">号池管理</h2>
+      <div class="spacer"></div>
+      <button id="addAccBtn" class="primary sm">添加号</button>
+      <button id="refreshBtn" class="sm">刷新</button>
+    </div>
+    <div style="overflow-x:auto">
+    <table>
+      <thead><tr>
+        <th>号</th><th>bucket</th><th>健康</th><th>状态</th><th>上传/失败</th><th>最近错误</th><th>操作</th>
+      </tr></thead>
+      <tbody id="poolBody"></tbody>
+    </table>
+    </div>
+  </div>
+</div>
+
+<div class="card" style="margin-bottom:16px">
+  <div class="toolbar">
+    <h2 style="margin:0">API Keys（客户端鉴权）</h2>
+    <div class="spacer"></div>
+    <button id="genKeyBtn" class="primary sm">生成新 Key</button>
+  </div>
+  <div style="overflow-x:auto">
+  <table>
+    <thead><tr><th>Key</th><th>操作</th></tr></thead>
+    <tbody id="apiKeyBody"></tbody>
+  </table>
+  </div>
+</div>
+
+<div class="card" style="margin-bottom:16px">
+  <div class="toolbar">
+    <h2 style="margin:0">上传记录（最近 10 条）</h2>
+    <div class="spacer"></div>
+    <button id="recRefreshBtn" class="sm">刷新</button>
+  </div>
+  <div style="overflow-x:auto">
+  <table>
+    <thead><tr><th>时间</th><th>文件</th><th>大小</th><th>号</th><th>结果</th><th>对象/URL</th></tr></thead>
+    <tbody id="recBody"></tbody>
+  </table>
+  </div>
+</div>
+
+<div class="card" id="sysCard" style="display:none">
+  <h2>系统信息</h2>
+  <div class="kv" id="sysKv"></div>
+</div>
+
+<!-- 添加号模态框 -->
+<div class="modal-mask" id="addModal">
+  <div class="modal">
+    <h3>添加号</h3>
+    <label>号名称（唯一标识，如 acc-4）</label>
+    <input type="text" id="addName" placeholder="acc-4">
+    <label>bucket（可选，留空走 default_bucket 或自动探测）</label>
+    <input type="text" id="addBucket" placeholder="可选">
+    <label>SA Key JSON 内容</label>
+    <textarea id="addKeyJSON" placeholder="粘贴 keys/acc-4.json 的完整内容..."></textarea>
+    <div class="err-text" id="addErr"></div>
+    <div class="actions">
+      <button id="addCancelBtn">取消</button>
+      <button id="addSubmitBtn" class="primary">添加</button>
+    </div>
+  </div>
+</div>
+
+<!-- API Key 生成后一次性显示 -->
+<div class="modal-mask" id="keyModal">
+  <div class="modal" style="width:520px">
+    <h3>新的 API Key（只显示这一次）</h3>
+    <div class="warn">⚠ 请立即复制保存。关闭后无法再查看完整值。</div>
+    <div class="key-display mono" id="newKeyText"></div>
+    <div class="actions">
+      <button id="keyCopyBtn">复制</button>
+      <button id="keyCloseBtn" class="primary">关闭</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const $=s=>document.querySelector(s);
+const state={accounts:[],pool:null};
+
+function toast(msg){const m=$('#msg');m.textContent=msg;m.style.display='block';clearTimeout(m._t);m._t=setTimeout(()=>m.style.display='none',2600);}
+
+function fmtSize(n){if(!n&&n!==0)return '-';if(n<1024)return n+'B';if(n<1048576)return(n/1024).toFixed(1)+'KB';if(n<1073741824)return(n/1048576).toFixed(1)+'MB';return(n/1073741824).toFixed(2)+'GB';}
+
+async function api(path,opts={}){
+  const headers=Object.assign({'Content-Type':'application/json'},opts.headers||{});
+  const res=await fetch(path,Object.assign({},opts,{headers,credentials:'same-origin'}));
+  if(res.status===401){location.href='/login';throw new Error('unauthorized');}
+  let data={};
+  try{data=await res.json();}catch(e){}
+  if(!res.ok)throw new Error(data.error||('HTTP '+res.status));
+  return data;
+}
+
+function renderStats(st){
+  const items=[
+    ['账号总数',st.accounts||0,'info'],
+    ['启用',st.enabled||0,'ok'],
+    ['健康',(st.health_ok||0)+'/'+(st.accounts||0),st.health_fail>0?'warn':'ok'],
+    ['熔断中',st.circuit_open||0,st.circuit_open>0?'warn':'info'],
+    ['成功率',st.success_rate||'-',st.success_rate==='-'?'dim':'ok'],
+  ];
+  $('#statsRow').innerHTML=items.map(([l,n,c])=>`<div class="stat"><div class="num ${c}">${n}</div><div class="lbl">${l}</div></div>`).join('');
+}
+
+function healthBadge(a){
+  if(a.health==='ok')return'<span class="badge ok">正常</span>';
+  if(a.health==='fail')return'<span class="badge fail">异常</span>';
+  return'<span class="badge off">未测</span>';
+}
+
+function badge(st){
+  if(!st.enabled)return'<span class="badge off">禁用</span>';
+  if(st.circuit)return`<span class="badge circuit">熔断</span>`;
+  return'<span class="badge on">在线</span>';
+}
+
+function renderPool(data){
+  state.pool=data;
+  state.accounts=data.accounts||[];
+  renderStats(data.stats);
+  const tb=$('#poolBody');
+  tb.innerHTML=(data.accounts||[]).map(a=>{
+    const cool=a.cool_till>Math.floor(Date.now()/1000)?'冷却至 '+new Date(a.cool_till*1000).toLocaleTimeString('zh-CN',{hour12:false}):'';
+    const err=a.last_error?`<span class="err-text">${esc(a.last_error)}</span>`:'<span style="color:var(--dim)">-</span>';
+    const hat=a.health_at?new Date(a.health_at*1000).toLocaleTimeString('zh-CN',{hour12:false}):'';
+    const herr=a.health_error?`<div style="color:var(--red);font-size:11px;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(a.health_error)}">${esc(a.health_error)}</div>`:'';
+    return `<tr>
+      <td class="mono">${esc(a.name)}</td>
+      <td class="mono">${esc(a.bucket)}</td>
+      <td>${healthBadge(a)}${hat?'<div style="color:var(--dim);font-size:11px">'+hat+'</div>':''}${herr}</td>
+      <td>${badge(a)}${cool?'<div style="color:var(--dim);font-size:11px">'+cool+'</div>':''}</td>
+      <td class="mono">${a.uploads} / <span style="color:${a.failures>0?'var(--red)':'var(--dim)'}">${a.failures}</span></td>
+      <td>${err}</td>
+      <td><div class="actions">
+        <button class="sm" data-act="probe" data-name="${esc(a.name)}">探测</button>
+        <button class="sm" data-act="toggle" data-name="${esc(a.name)}">${a.enabled?'禁用':'启用'}</button>
+        <button class="sm danger" data-act="remove" data-name="${esc(a.name)}">移除</button>
+      </div></td>
+    </tr>`;
+  }).join('')||'<tr><td colspan="7" style="color:var(--dim)">暂无账号</td></tr>';
+
+  const sel=$('#accSelect');
+  const cur=sel.value;
+  sel.innerHTML='<option value="">自动轮询</option>'+data.accounts.map(a=>`<option value="${esc(a.name)}">${esc(a.name)}</option>`).join('');
+  sel.value=cur;
+
+  const max=Math.max(1,...data.accounts.map(a=>a.uploads));
+  $('#dist').innerHTML=(data.accounts||[]).map(a=>{
+    const pct=a.uploads?Math.round(a.uploads/max*100):0;
+    return `<div class="bar-dist"><span class="lbl" title="${esc(a.name)}">${esc(a.name)}</span>
+      <div class="track"><div class="fill" style="width:${pct}%"></div></div>
+      <span class="cnt">${a.uploads}</span></div>`;
+  }).join('')||'<div style="color:var(--dim)">暂无数据</div>';
+}
+
+function renderRecords(list){
+  $('#recBody').innerHTML=(list||[]).map(r=>{
+    const badge=r.success?'<span class="badge ok">成功</span>':'<span class="badge fail">失败</span>';
+    const obj=r.success?`<span class="mono" style="color:var(--teal)" title="${esc(r.url)}">${esc(r.object)}</span>`:`<span class="err-text">${esc(r.error||'')}</span>`;
+    return `<tr>
+      <td class="mono" style="white-space:nowrap">${esc(r.time)}</td>
+      <td>${esc(r.filename)}</td>
+      <td class="mono">${fmtSize(r.size)}</td>
+      <td class="mono">${esc(r.account||'-')}</td>
+      <td>${badge}</td>
+      <td>${obj}</td>
+    </tr>`;
+  }).join('')||'<tr><td colspan="6" style="color:var(--dim)">暂无记录</td></tr>';
+}
+
+async function loadPool(){
+  try{
+    const d=await api('/admin/pool');
+    renderPool(d);
+    const a=d.accounts.length;
+    $('#sysInfo').textContent=`${a} 个号 · ${d.default_bucket} · 上限 ${d.max_size_mb}MB · 重试 ${d.retry}`;
+    $('#sysCard').style.display='block';
+    $('#sysKv').innerHTML=Object.entries({默认bucket:d.default_bucket,单文件上限:d.max_size_mb+'MB',并发上限:d.max_concurrent,请求超时:d.request_timeout+'s',换号重试:d.retry,账号数:a}).map(([k,v])=>`<div><span>${k}</span><b>${v}</b></div>`).join('');
+  }catch(e){
+    if(e.message!=='unauthorized')$('#sysInfo').textContent='加载失败';
+  }
+}
+
+async function loadRecords(){
+  try{
+    const d=await api('/admin/records?limit=10');
+    renderRecords(d.records);
+  }catch(e){}
+}
+
+function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+
+/* 退出 */
+$('#logoutBtn').onclick=async()=>{
+  try{await fetch('/admin/logout',{method:'POST',credentials:'same-origin'});}catch(e){}
+  location.href='/login';
+};
+
+/* 上传 */
+let selFile=null;
+const drop=$('#drop'),fi=$('#fileInput');
+drop.onclick=()=>fi.click();
+drop.ondragover=e=>{e.preventDefault();drop.classList.add('drag');};
+drop.ondragleave=()=>drop.classList.remove('drag');
+drop.ondrop=e=>{
+  e.preventDefault();drop.classList.remove('drag');
+  if(e.dataTransfer.files.length){selFile=e.dataTransfer.files[0];showFile();}
+};
+fi.onchange=()=>{selFile=fi.files[0];showFile();};
+function showFile(){
+  $('#dropHint').classList.add('hidden');
+  $('#fileName').classList.remove('hidden');
+  $('#fileName').textContent='📄 '+selFile.name+' ('+fmtSize(selFile.size)+')';
+}
+
+$('#uploadBtn').onclick=()=>{
+  if(!selFile){toast('先选择文件');return;}
+  const key=$('#keySelect').value;
+  if(!key){toast('先选择 API Key（API Keys 面板生成）');return;}
+  const fd=new FormData();
+  fd.append('file',selFile);
+  const xhr=new XMLHttpRequest();
+  const acc=$('#accSelect').value, bkt=$('#bucketInput').value.trim();
+  xhr.open('POST','/upload');
+  xhr.setRequestHeader('Authorization','Bearer '+key);
+  if(acc)xhr.setRequestHeader('X-GCS-Account',acc);
+  if(bkt)xhr.setRequestHeader('X-GCS-Bucket',bkt);
+  const bar=$('#progressBar'),fill=$('#progressFill'),btn=$('#uploadBtn');
+  bar.classList.remove('hidden');fill.style.width='0%';btn.disabled=true;
+  xhr.upload.onprogress=e=>{if(e.lengthComputable)fill.style.width=Math.round(e.loaded/e.total*100)+'%';};
+  xhr.onload=()=>{
+    btn.disabled=false;
+    let d={};try{d=JSON.parse(xhr.responseText);}catch(e){}
+    const box=$('#uploadResult');
+    if(xhr.status===200){
+      box.className='result ok';
+      box.innerHTML=`<div style="color:var(--teal);font-weight:500">上传成功</div>
+        <div class="url"><span>${esc(d.uri)}</span><button class="sm" onclick="copyUrl(this)">复制</button></div>
+        <div class="kv">
+          <div><span>uri</span><b style="color:var(--teal);word-break:break-all">${esc(d.uri)}</b></div>
+          <div><span>name</span><b>${esc(d.name||'-')}</b></div>
+          <div><span>mimeType</span><b>${esc(d.mimeType||'-')}</b></div>
+          <div><span>大小</span><b>${fmtSize(d.size)}</b></div>
+        </div>`;
+    }else{
+      box.className='result err';
+      box.innerHTML=`<div style="color:var(--red);font-weight:500">上传失败</div><div class="err-text">${esc(d.error||xhr.responseText)}</div>`;
+    }
+    loadPool();loadRecords();
+  };
+  xhr.onerror=()=>{btn.disabled=false;$('#uploadResult').className='result err';$('#uploadResult').innerHTML='<div class="err-text">网络错误</div>';};
+  xhr.send(fd);
+};
+function copyUrl(btn){
+  const url=btn.parentElement.firstChild.textContent.trim();
+  navigator.clipboard.writeText(url).then(()=>toast('已复制 URL')).catch(()=>toast('复制失败'));
+}
+
+/* 号池操作 */
+$('#poolBody').addEventListener('click',async e=>{
+  const b=e.target.closest('button[data-act]');
+  if(!b)return;
+  const name=b.dataset.name,act=b.dataset.act;
+  if(act==='remove'&&!confirm('确定移除号 '+name+'？'))return;
+  try{
+    if(act==='remove')await api('/admin/pool/accounts/'+encodeURIComponent(name),{method:'DELETE'});
+    else if(act==='toggle'){
+      const en=b.textContent==='启用';
+      await api('/admin/pool/accounts/'+encodeURIComponent(name)+'/'+(en?'enable':'disable'),{method:'POST'});
+    }
+    else if(act==='probe'){
+      await api('/admin/pool/accounts/'+encodeURIComponent(name)+'/probe',{method:'POST'});
+      toast('已触发探活');
+    }
+    toast(act==='remove'?'已移除':'已更新');
+    loadPool();
+  }catch(err){toast(err.message);}
+});
+
+$('#refreshBtn').onclick=()=>{loadPool();loadRecords();toast('已刷新');};
+$('#recRefreshBtn').onclick=()=>loadRecords();
+
+/* 添加号（模态框） */
+function openAddModal(){$('#addName').value='';$('#addBucket').value='';$('#addKeyJSON').value='';$('#addErr').textContent='';$('#addModal').classList.add('show');$('#addName').focus();}
+function closeAddModal(){$('#addModal').classList.remove('show');}
+$('#addAccBtn').onclick=openAddModal;
+$('#addCancelBtn').onclick=closeAddModal;
+$('#addSubmitBtn').onclick=async()=>{
+  const n=$('#addName').value.trim();
+  const bucket=$('#addBucket').value.trim();
+  const keyJSON=$('#addKeyJSON').value.trim();
+  if(!n){$('#addErr').textContent='请填写号名称';return;}
+  if(!keyJSON){$('#addErr').textContent='请粘贴 SA Key JSON';return;}
+  try{
+    JSON.parse(keyJSON);
+    await api('/admin/pool/accounts',{method:'POST',body:JSON.stringify({name:n,bucket,key_json:keyJSON})});
+    toast('已添加 '+n);
+    closeAddModal();
+    loadPool();
+  }catch(err){$('#addErr').textContent=err.message;}
+};
+$('#addModal').addEventListener('click',e=>{if(e.target.id==='addModal')closeAddModal();});
+
+/* API Keys */
+async function loadKeys(){
+  try{
+    const d=await api('/admin/api-keys');
+    const keys=d.keys||[];
+    renderKeys(keys);
+    const sel=$('#keySelect'),cur=sel.value;
+    sel.innerHTML=keys.length?keys.map(k=>`<option value="${esc(k)}">${esc(k.slice(0,8))}...${esc(k.slice(-4))}</option>`).join(''):'<option value="">（先生成）</option>';
+    sel.value=cur;
+  }catch(e){}
+}
+function renderKeys(keys){
+  $('#apiKeyBody').innerHTML=keys.length?keys.map(k=>`<tr>
+    <td class="mono">${esc(k.slice(0,8))}…${esc(k.slice(-4))} <span style="color:var(--dim)">(${k.length} 字符)</span></td>
+    <td><div class="actions">
+      <button class="sm" onclick="copyText('${esc(k)}')">复制</button>
+      <button class="sm danger" onclick="delKey('${esc(k)}')">删除</button>
+    </div></td>
+  </tr>`).join(''):'<tr><td colspan="2" style="color:var(--dim)">暂无 API Key</td></tr>';
+}
+function copyText(t){navigator.clipboard.writeText(t).then(()=>toast('已复制')).catch(()=>toast('复制失败'));}
+async function delKey(k){
+  if(!confirm('确定删除该 API Key？'))return;
+  try{await api('/admin/api-keys/'+encodeURIComponent(k),{method:'DELETE'});toast('已删除');loadKeys();}
+  catch(err){toast(err.message);}
+}
+$('#genKeyBtn').onclick=async()=>{
+  try{
+    const d=await api('/admin/api-keys',{method:'POST'});
+    $('#newKeyText').textContent=d.key;
+    $('#keyModal').classList.add('show');
+    loadKeys();
+  }catch(err){toast(err.message);}
+};
+$('#keyCopyBtn').onclick=()=>copyText($('#newKeyText').textContent);
+$('#keyCloseBtn').onclick=()=>$('#keyModal').classList.remove('show');
+$('#keyModal').addEventListener('click',e=>{if(e.target.id==='keyModal')$('#keyModal').classList.remove('show');});
+
+/* 自动刷新 */
+setInterval(()=>{loadPool();loadRecords();loadKeys();},10000);
+
+loadPool();loadRecords();loadKeys();
+</script>
+</body>
+</html>

@@ -1,0 +1,30 @@
+{
+  "listen": ":8080",
+  "default_bucket": "your-default-bucket",
+  "max_size": 1024,
+  "retry": 3,
+  "max_concurrent": 1024,
+  "request_timeout": 1800,
+  "retry_429_base": 1,
+  "retry_429_max": 5,
+  "signed_url_ttl": 604800,
+  "health_check_interval": 300,
+  "keys_scan_interval": 60,
+  "api_keys": [],
+  "admin_password": "change-me-to-a-strong-password",
+  "accounts": [
+    {
+      "name": "acc-1",
+      "key_file": "keys/acc-1.json"
+    },
+    {
+      "name": "acc-2",
+      "key_file": "keys/acc-2.json",
+      "bucket": "acc-2-special-bucket"
+    },
+    {
+      "name": "acc-3",
+      "key_file": "keys/acc-3.json"
+    }
+  ]
+}

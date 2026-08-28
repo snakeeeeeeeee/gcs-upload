@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>登录 · gcs-pool</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#0f1115;color:#e6e9ef;font:13px/1.6 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif;
+  min-height:100vh;display:flex;align-items:center;justify-content:center}
+.wrap{width:340px}
+.brand{text-align:center;margin-bottom:28px}
+.brand .logo{width:52px;height:52px;border-radius:14px;background:#0f2b21;border:1px solid #1e5c46;
+  display:flex;align-items:center;justify-content:center;margin:0 auto 12px;font-size:22px;color:#3ecf9e}
+.brand h1{font-size:18px;font-weight:600}
+.brand p{color:#6b7382;font-size:12px;margin-top:4px}
+.card{background:#171b22;border:1px solid #2a303b;border-radius:14px;padding:22px}
+.card label{display:block;color:#9aa3b2;font-size:12px;margin-bottom:6px}
+.card input{width:100%;background:#1d222b;border:1px solid #2a303b;color:#e6e9ef;border-radius:8px;
+  padding:10px 12px;font-size:14px;outline:none;margin-bottom:14px}
+.card input:focus{border-color:#4a9eff}
+.card input::placeholder{color:#4a515e}
+.card button{width:100%;background:#1f6feb;border:none;color:#fff;border-radius:8px;padding:10px;
+  font-size:14px;cursor:pointer;transition:background .15s}
+.card button:hover{background:#2a7bf5}
+.card button:disabled{opacity:.5;cursor:not-allowed}
+.err{color:#e2574a;font-size:12.5px;margin-top:10px;min-height:18px;text-align:center}
+.hint{color:#6b7382;font-size:11.5px;text-align:center;margin-top:16px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="brand">
+    <div class="logo">G</div>
+    <h1>gcs-pool 管理台</h1>
+    <p>多 GCS 账号池 · 上传服务</p>
+  </div>
+  <div class="card">
+    <label for="token">管理员 Token</label>
+    <input type="password" id="token" placeholder="请输入 admin_token" autocomplete="current-password">
+    <button id="btn">登 录</button>
+    <div class="err" id="err"></div>
+  </div>
+  <div class="hint">登录后进入管理台</div>
+</div>
+<script>
+const input=document.getElementById('token'),btn=document.getElementById('btn'),err=document.getElementById('err');
+function login(){
+  const t=input.value.trim();
+  if(!t){err.textContent='请输入 token';return;}
+  btn.disabled=true;btn.textContent='登录中...';err.textContent='';
+  fetch('/admin/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token:t})})
+    .then(async res=>{
+      const d=await res.json().catch(()=>({}));
+      if(res.ok){location.href='/';}
+      else{err.textContent=d.error||('登录失败 ('+res.status+')');btn.disabled=false;btn.textContent='登 录';}
+    })
+    .catch(()=>{err.textContent='网络错误';btn.disabled=false;btn.textContent='登 录';});
+}
+btn.onclick=login;
+input.addEventListener('keydown',e=>{if(e.key==='Enter')login();});
+input.focus();
+</script>
+</body>
+</html>

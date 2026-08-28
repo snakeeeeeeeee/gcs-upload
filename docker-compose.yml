@@ -1,0 +1,14 @@
+services:
+  gcs-pool:
+    build: .
+    image: gcs-pool:latest
+    container_name: gcs-pool
+    ports:
+      - "11223:8090"
+    volumes:
+      # 配置与 key 挂载自宿主机（管理页的账号变更会写回 config.json，必须可写）
+      - ./config.json:/app/config/config.json
+      - ./keys:/app/config/keys
+    environment:
+      TZ: Asia/Shanghai
+    restart: unless-stopped
