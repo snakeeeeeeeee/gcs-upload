@@ -24,8 +24,9 @@ import (
 
 // fakePool 构造只有名字的假账号，仅测调度逻辑（默认标记为健康，老测试不需要显式探测）
 func fakePool(n int) *Pool {
-	p := &Pool{retry: 3, defaultBucket: "bkt",
-		apiKeys: make(map[string]struct{}), sem: make(chan struct{}, 2)}
+	p := &Pool{defaultBucket: "bkt",
+		apiKeys: make(map[string]struct{}), sem: newDynSem(2)}
+	p.retry.Store(3)
 	for i := 0; i < n; i++ {
 		acc := &Account{Name: string(rune('a' + i)), Bucket: "bkt"}
 		acc.Enabled.Store(true)
@@ -194,8 +195,9 @@ func (a *Account) markHealth(ok bool) {
 
 func TestNextSkipsUntested(t *testing.T) {
 	// 自行构造不调 markHealth 的池（fakePool 默认健康）
-	p := &Pool{retry: 3, defaultBucket: "bkt",
-		apiKeys: make(map[string]struct{}), sem: make(chan struct{}, 2)}
+	p := &Pool{defaultBucket: "bkt",
+		apiKeys: make(map[string]struct{}), sem: newDynSem(2)}
+	p.retry.Store(3)
 	for _, n := range []string{"a", "b"} {
 		acc := &Account{Name: n, Bucket: "bkt"}
 		acc.Enabled.Store(true)
@@ -376,5 +378,72 @@ func TestAutoCreateBucketIntegration(t *testing.T) {
 	// 清理对象
 	if err := client.Bucket(name).Object("probe.txt").Delete(ctx); err != nil {
 		t.Logf("cleanup object failed: %v", err)
+	}
+}
+
+func TestDynSemBasicAcquireRelease(t *testing.T) {
+	s := newDynSem(2)
+	ctx := t.Context()
+	if err := s.Acquire(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Acquire(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// 第三个应阻塞
+	ctx2, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
+	defer cancel()
+	if err := s.Acquire(ctx2); err == nil {
+		t.Fatal("3rd acquire should timeout at cap=2")
+	}
+	// 释放一个
+	s.Release()
+	if err := s.Acquire(ctx); err != nil {
+		t.Fatalf("after release: %v", err)
+	}
+}
+
+func TestDynSemSetCapExpand(t *testing.T) {
+	s := newDynSem(1)
+	ctx := t.Context()
+	s.Acquire(ctx)
+	// 容量=1，第二个超时
+	ctx2, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
+	defer cancel()
+	if err := s.Acquire(ctx2); err == nil {
+		t.Fatal("should block at cap=1")
+	}
+	// 扩到 5：后台等待者应能立即获取
+	got := make(chan error, 1)
+	go func() { got <- s.Acquire(ctx) }()
+	time.Sleep(20 * time.Millisecond)
+	s.SetCap(5)
+	select {
+	case err := <-got:
+		if err != nil {
+			t.Fatalf("after expand: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("acquire goroutine not woken after SetCap expand")
+	}
+}
+
+func TestDynSemSetCapShrink(t *testing.T) {
+	s := newDynSem(5)
+	ctx := t.Context()
+	for i := 0; i < 5; i++ {
+		if err := s.Acquire(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// 缩到 2：已有 5 个占用不影响，新 Acquire 应阻塞
+	s.SetCap(2)
+	if s.cap.Load() != 2 {
+		t.Fatalf("cap: got %d want 2", s.cap.Load())
+	}
+	ctx2, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
+	defer cancel()
+	if err := s.Acquire(ctx2); err == nil {
+		t.Fatal("should block after shrink to 2 with 5 in use")
 	}
 }

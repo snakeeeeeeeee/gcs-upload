@@ -357,3 +357,50 @@ func TestUpdateConfigMaxSizeTTL(t *testing.T) {
 		t.Fatalf("max_size_mb too big: got %d want 400", rec.Code)
 	}
 }
+
+func TestUpdateConfigAllFields(t *testing.T) {
+	h, p, cfgPath := newTestHandler(t)
+	// 同时改 5 项
+	rec := doReq(h, "POST", "/admin/config",
+		[]byte(`{"max_size_mb":512,"ttl_days":14,"max_concurrent":256,"request_timeout":600,"retry":5}`),
+		loginCookie(t, h))
+	if rec.Code != 200 {
+		t.Fatalf("update: got %d want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	// 池内即时生效
+	if p.MaxSizeMB() != 512 {
+		t.Fatalf("MaxSizeMB: got %d want 512", p.MaxSizeMB())
+	}
+	if p.TTLDays() != 14 {
+		t.Fatalf("TTLDays: got %d want 14", p.TTLDays())
+	}
+	if p.MaxConcurrent() != 256 {
+		t.Fatalf("MaxConcurrent: got %d want 256", p.MaxConcurrent())
+	}
+	if p.RequestTimeout().Seconds() != 600 {
+		t.Fatalf("RequestTimeout: got %v want 600s", p.RequestTimeout())
+	}
+	if p.Retry() != 5 {
+		t.Fatalf("Retry: got %d want 5", p.Retry())
+	}
+	// 全部写回 config
+	cfg := readCfg(t, cfgPath)
+	if cfg.MaxSize != 512 || cfg.TTLDays != 14 || cfg.MaxConcurrent != 256 ||
+		cfg.RequestTimeout != 600 || cfg.Retry != 5 {
+		t.Fatalf("config persisted mismatch: %+v", cfg)
+	}
+	// 非法值
+	bad := [][]byte{
+		[]byte(`{"max_concurrent":0}`),
+		[]byte(`{"max_concurrent":99999}`),
+		[]byte(`{"request_timeout":5}`),
+		[]byte(`{"request_timeout":99999}`),
+		[]byte(`{"retry":-1}`),
+		[]byte(`{"retry":99}`),
+	}
+	for _, b := range bad {
+		if rec := doReq(h, "POST", "/admin/config", b, loginCookie(t, h)); rec.Code != 400 {
+			t.Fatalf("expected 400 for %s, got %d", b, rec.Code)
+		}
+	}
+}

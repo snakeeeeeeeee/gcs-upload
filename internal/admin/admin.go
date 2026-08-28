@@ -326,9 +326,12 @@ func (h *Handler) ToggleAccount(w http.ResponseWriter, r *http.Request) {
 // updateConfig POST /admin/config  body: {default_bucket?, ttl_days?}
 func (h *Handler) UpdateConfig(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		DefaultBucket string `json:"default_bucket"`
-		TTLDays       *int   `json:"ttl_days"`
-		MaxSizeMB     *int64 `json:"max_size_mb"`
+		DefaultBucket  string `json:"default_bucket"`
+		TTLDays        *int   `json:"ttl_days"`
+		MaxSizeMB      *int64 `json:"max_size_mb"`
+		MaxConcurrent  *int   `json:"max_concurrent"`
+		RequestTimeout *int   `json:"request_timeout"`
+		Retry          *int   `json:"retry"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&req); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid json: "+err.Error())
@@ -375,11 +378,59 @@ func (h *Handler) UpdateConfig(w http.ResponseWriter, r *http.Request) {
 		}
 		slog.Info("admin: max_size changed", "mb", *req.MaxSizeMB)
 	}
+	if req.MaxConcurrent != nil {
+		if *req.MaxConcurrent < 1 || *req.MaxConcurrent > 65535 {
+			writeErr(w, http.StatusBadRequest, "max_concurrent must be 1-65535")
+			return
+		}
+		h.pool.SetMaxConcurrent(*req.MaxConcurrent)
+		h.mu.Lock()
+		err := h.updateConfig(func(cfg *pool.Config) { cfg.MaxConcurrent = *req.MaxConcurrent })
+		h.mu.Unlock()
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "persist config: "+err.Error())
+			return
+		}
+		slog.Info("admin: max_concurrent changed", "value", *req.MaxConcurrent)
+	}
+	if req.RequestTimeout != nil {
+		if *req.RequestTimeout < 10 || *req.RequestTimeout > 86400 {
+			writeErr(w, http.StatusBadRequest, "request_timeout must be 10-86400 seconds (10s ~ 24h)")
+			return
+		}
+		h.pool.SetRequestTimeout(*req.RequestTimeout)
+		h.mu.Lock()
+		err := h.updateConfig(func(cfg *pool.Config) { cfg.RequestTimeout = *req.RequestTimeout })
+		h.mu.Unlock()
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "persist config: "+err.Error())
+			return
+		}
+		slog.Info("admin: request_timeout changed", "seconds", *req.RequestTimeout)
+	}
+	if req.Retry != nil {
+		if *req.Retry < 0 || *req.Retry > 20 {
+			writeErr(w, http.StatusBadRequest, "retry must be 0-20")
+			return
+		}
+		h.pool.SetRetry(*req.Retry)
+		h.mu.Lock()
+		err := h.updateConfig(func(cfg *pool.Config) { cfg.Retry = *req.Retry })
+		h.mu.Unlock()
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "persist config: "+err.Error())
+			return
+		}
+		slog.Info("admin: retry changed", "value", *req.Retry)
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":             true,
-		"default_bucket": h.pool.DefaultBucket(),
-		"ttl_days":       h.pool.TTLDays(),
-		"max_size_mb":    h.pool.MaxSizeMB(),
+		"ok":              true,
+		"default_bucket":  h.pool.DefaultBucket(),
+		"ttl_days":        h.pool.TTLDays(),
+		"max_size_mb":     h.pool.MaxSizeMB(),
+		"max_concurrent":  h.pool.MaxConcurrent(),
+		"request_timeout": h.pool.RequestTimeout().Seconds(),
+		"retry":           h.pool.Retry(),
 	})
 }
 

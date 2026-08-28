@@ -165,14 +165,20 @@ tr:hover td{background:#1a1f28}
   <h2>系统信息</h2>
   <div class="kv" id="sysKv"></div>
   <div style="margin-top:14px;border-top:1px solid var(--border);padding-top:12px">
-    <div class="row">
+    <div class="row" style="flex-wrap:wrap;gap:8px 14px">
       <label>单文件上限 (MB)</label>
       <input type="number" id="cfgMaxSize" min="1" max="512000" style="width:90px" title="实时生效，保存后写回 config.json">
-      <label style="margin-left:16px">存储期限 (天)</label>
-      <input type="number" id="cfgTTL" min="0" max="365" style="width:80px" title="0 = 永久，实时生效，保存后写回 config.json">
+      <label style="margin-left:4px">存储期限 (天)</label>
+      <input type="number" id="cfgTTL" min="0" max="365" style="width:70px" title="0 = 永久">
+      <label style="margin-left:4px">并发上限</label>
+      <input type="number" id="cfgMaxConcurrent" min="1" max="65535" style="width:70px" title="全局并发上传上限，热更新信号量容量">
+      <label style="margin-left:4px">请求超时 (s)</label>
+      <input type="number" id="cfgReqTimeout" min="10" max="86400" style="width:80px" title="单个上传请求总超时（10s~24h）">
+      <label style="margin-left:4px">换号重试</label>
+      <input type="number" id="cfgRetry" min="0" max="20" style="width:60px" title="普通失败换号重试次数（429 退避另算）">
       <button id="cfgSaveBtn" class="sm primary">保存</button>
     </div>
-    <div style="color:var(--dim);font-size:11.5px">单文件上限与全局存储期限，保存即实时生效并写回 config.json</div>
+    <div style="color:var(--dim);font-size:11.5px">5 项配置保存即实时生效并写回 config.json（并发上限支持动态扩缩）</div>
     <div id="cfgResult" style="color:var(--muted);font-size:12px;margin-top:6px"></div>
   </div>
   <div style="margin-top:14px;border-top:1px solid var(--border);padding-top:12px">
@@ -336,6 +342,9 @@ async function loadPool(){
     $('#sysKv').innerHTML=Object.entries({默认bucket:d.default_bucket,单文件上限:d.max_size_mb+'MB',存储期限:d.ttl_days>0?d.ttl_days+'天':'永久',并发上限:d.max_concurrent,请求超时:d.request_timeout+'s',换号重试:d.retry,账号数:a}).map(([k,v])=>`<div><span>${k}</span><b>${v}</b></div>`).join('');
     if(!$('#cfgMaxSize').value){$('#cfgMaxSize').value=d.max_size_mb;}
     if(!$('#cfgTTL').value){$('#cfgTTL').value=d.ttl_days;}
+    if(!$('#cfgMaxConcurrent').value){$('#cfgMaxConcurrent').value=d.max_concurrent;}
+    if(!$('#cfgReqTimeout').value){$('#cfgReqTimeout').value=d.request_timeout;}
+    if(!$('#cfgRetry').value){$('#cfgRetry').value=d.retry;}
     if(!$('#lcTTL').value){$('#lcTTL').value='1,7,30';}
   }catch(e){
     if(e.message!=='unauthorized')$('#sysInfo').textContent='加载失败';
@@ -538,15 +547,23 @@ $('#lcBtn').onclick=async()=>{
   }catch(err){toast(err.message);}
 };
 
-/* 系统配置保存（单文件上限 + 存储期限，实时生效 + 写回 config） */
+/* 系统配置保存（5 项：单文件上限/存储期限/并发上限/请求超时/换号重试，实时生效 + 写回 config） */
 $('#cfgSaveBtn').onclick=async()=>{
   const mb=parseInt($('#cfgMaxSize').value);
   const ttl=parseInt($('#cfgTTL').value);
+  const mc=parseInt($('#cfgMaxConcurrent').value);
+  const rt=parseInt($('#cfgReqTimeout').value);
+  const ry=parseInt($('#cfgRetry').value);
   if(!mb||mb<1||mb>512000){toast('单文件上限须为 1-512000 MB');return;}
   if(isNaN(ttl)||ttl<0||ttl>365){toast('存储期限须为 0-365 天（0=永久）');return;}
+  if(!mc||mc<1||mc>65535){toast('并发上限须为 1-65535');return;}
+  if(!rt||rt<10||rt>86400){toast('请求超时须为 10-86400 秒（10s~24h）');return;}
+  if(isNaN(ry)||ry<0||ry>20){toast('换号重试须为 0-20');return;}
   try{
-    const d=await api('/admin/config',{method:'POST',body:JSON.stringify({max_size_mb:mb,ttl_days:ttl})});
-    toast('已保存：上限 '+d.max_size_mb+'MB / 存储 '+(d.ttl_days>0?d.ttl_days+' 天':'永久'));
+    const d=await api('/admin/config',{method:'POST',body:JSON.stringify({
+      max_size_mb:mb, ttl_days:ttl, max_concurrent:mc, request_timeout:rt, retry:ry
+    })});
+    toast('已保存：上限 '+d.max_size_mb+'MB / 存储 '+(d.ttl_days>0?d.ttl_days+'天':'永久')+' / 并发 '+d.max_concurrent+' / 超时 '+d.request_timeout+'s / 重试 '+d.retry);
     loadPool();
   }catch(err){toast(err.message);}
 };

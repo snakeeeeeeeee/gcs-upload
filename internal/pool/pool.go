@@ -141,11 +141,11 @@ type Pool struct {
 	defaultBucket  string
 	bucketLocation string
 	maxSize        atomic.Int64 // 单文件上限（字节），可热更新
-	retry          int
+	retry          atomic.Int32 // 换号重试次数，可热更新
 	circuitThresh  int
 	coolDown       time.Duration
-	maxConcurrent  int
-	requestTimeout time.Duration
+	maxConcurrent  atomic.Int32 // 全局并发上限（可热更新，由 sem 兜底）
+	requestTimeout atomic.Int64 // 上传请求超时（纳秒），可热更新
 	retry429Base   time.Duration
 	retry429Max    int
 	signedTTL      time.Duration
@@ -155,7 +155,7 @@ type Pool struct {
 	healthDone     chan struct{}
 	apiKeysMu      sync.RWMutex
 	apiKeys        map[string]struct{}
-	sem            chan struct{}
+	sem            *dynSem      // 动态并发信号量（容量可热更新）
 	counter        atomic.Uint64
 }
 
@@ -220,11 +220,11 @@ func New(ctx context.Context, cfg Config) (*Pool, error) {
 	p := &Pool{
 		defaultBucket:  cfg.DefaultBucket,
 		bucketLocation: cfg.BucketLocation,
-		retry:          cfg.Retry,
+		retry:          atomic.Int32{},
 		circuitThresh:  defaultCircuit,
 		coolDown:       defaultCoolDown,
-		maxConcurrent:  cfg.MaxConcurrent,
-		requestTimeout: time.Duration(cfg.RequestTimeout) * time.Second,
+		maxConcurrent:  atomic.Int32{},
+		requestTimeout: atomic.Int64{},
 		retry429Base:   time.Duration(cfg.Retry429Base) * time.Second,
 		retry429Max:    cfg.Retry429Max,
 		signedTTL:      time.Duration(cfg.SignedURLTTL) * time.Second,
@@ -233,9 +233,12 @@ func New(ctx context.Context, cfg Config) (*Pool, error) {
 		healthStop:     make(chan struct{}),
 		healthDone:     make(chan struct{}),
 		apiKeys:        make(map[string]struct{}),
-		sem:            make(chan struct{}, cfg.MaxConcurrent),
+		sem:            newDynSem(cfg.MaxConcurrent),
 	}
-	p.maxSize.Store(cfg.MaxSize * 1024 * 1024) // MB → 字节
+	p.maxSize.Store(cfg.MaxSize * 1024 * 1024)   // MB → 字节
+	p.retry.Store(int32(cfg.Retry))
+	p.maxConcurrent.Store(int32(cfg.MaxConcurrent))
+	p.requestTimeout.Store(int64(time.Duration(cfg.RequestTimeout) * time.Second))
 
 	for _, k := range cfg.APIKeys {
 		if k != "" {
@@ -554,7 +557,7 @@ func (p *Pool) UploadWith(ctx context.Context, object string, newReader NewReade
 	var lastErr error
 	var tried []string
 	attempts, backoffs := 0, 0
-	for attempts < p.retry && backoffs <= p.retry429Max {
+	for attempts < p.Retry() && backoffs <= p.retry429Max {
 		acc := p.Next()
 		if acc == nil {
 			if p.AccountCount() == 0 {
@@ -595,29 +598,99 @@ func (p *Pool) UploadWith(ctx context.Context, object string, newReader NewReade
 	return nil, fmt.Errorf("pool: upload failed after %d attempt(s) (tried %v): %w", len(tried), tried, lastErr)
 }
 
+// dynSem 动态容量信号量：容量可运行时调整（热更新 max_concurrent）
+// 实现：atomic 计数（CAS 抢占，无超额）+ 唤醒 channel（容量变大/有释放时通知等待者）
+type dynSem struct {
+	cap   atomic.Int64
+	inUse atomic.Int64
+	wake  chan struct{} // cap=1，用作"有名事件"唤醒；满则丢
+}
+
+func newDynSem(initial int) *dynSem {
+	s := &dynSem{wake: make(chan struct{}, 1)}
+	if initial > 0 {
+		s.cap.Store(int64(initial))
+	}
+	return s
+}
+
+func (s *dynSem) Acquire(ctx context.Context) error {
+	for {
+		cap := s.cap.Load()
+		cur := s.inUse.Load()
+		if cur < cap {
+			if s.inUse.CompareAndSwap(cur, cur+1) {
+				return nil
+			}
+			continue // CAS 失败（被并发抢走）重试
+		}
+		// 容量已满：等待释放或扩容
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-s.wake:
+			// 被唤醒，重试
+		}
+	}
+}
+
+func (s *dynSem) Release() {
+	s.inUse.Add(-1)
+	select {
+	case s.wake <- struct{}{}: // 唤醒一个等待者
+	default: // 已有信号待消费，丢
+	}
+}
+
+func (s *dynSem) SetCap(n int64) {
+	s.cap.Store(n)
+	select {
+	case s.wake <- struct{}{}: // 容量变大可能解锁等待者
+	default:
+	}
+}
+
 // Acquire 获取一个并发上传名额（全局信号量，超限阻塞排队；ctx 取消则返回错误）
 func (p *Pool) Acquire(ctx context.Context) error {
-	select {
-	case p.sem <- struct{}{}:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
-	}
+	return p.sem.Acquire(ctx)
 }
 
 // Release 释放并发上传名额
 func (p *Pool) Release() {
-	<-p.sem
+	p.sem.Release()
 }
 
 // RequestTimeout 上传请求超时时长
 func (p *Pool) RequestTimeout() time.Duration {
-	return p.requestTimeout
+	return time.Duration(p.requestTimeout.Load())
 }
 
 // MaxConcurrent 全局并发上限
 func (p *Pool) MaxConcurrent() int {
-	return p.maxConcurrent
+	return int(p.maxConcurrent.Load())
+}
+
+// Retry 普通失败换号重试次数
+func (p *Pool) Retry() int { return int(p.retry.Load()) }
+
+// SetMaxConcurrent 热更新全局并发上限
+func (p *Pool) SetMaxConcurrent(n int) {
+	p.maxConcurrent.Store(int32(n))
+	p.sem.SetCap(int64(n))
+	slog.Info("pool: max_concurrent changed", "value", n)
+}
+
+// SetRequestTimeout 热更新上传请求超时（秒）
+func (p *Pool) SetRequestTimeout(seconds int) {
+	d := time.Duration(seconds) * time.Second
+	p.requestTimeout.Store(int64(d))
+	slog.Info("pool: request_timeout changed", "seconds", seconds)
+}
+
+// SetRetry 热更新换号重试次数
+func (p *Pool) SetRetry(n int) {
+	p.retry.Store(int32(n))
+	slog.Info("pool: retry changed", "value", n)
 }
 
 // isRateLimit 判断是否为 GCS 限流错误（HTTP 429 / gRPC ResourceExhausted）
@@ -1041,10 +1114,6 @@ func (p *Pool) SetTTLDays(days int) {
 	p.ttlDays.Store(int32(days))
 	slog.Info("pool: ttl_days changed", "days", days)
 }
-
-// Retry 换号重试次数
-func (p *Pool) Retry() int { return p.retry }
-
 // Close 关闭所有 client 并停止健康检查
 func (p *Pool) Close() {
 	select {
