@@ -161,20 +161,6 @@ tr:hover td{background:#1a1f28}
   </div>
 </div>
 
-<div class="card" style="margin-bottom:16px">
-  <div class="toolbar">
-    <h2 style="margin:0">上传记录（最近 10 条）</h2>
-    <div class="spacer"></div>
-    <button id="recRefreshBtn" class="sm">刷新</button>
-  </div>
-  <div style="overflow-x:auto">
-  <table>
-    <thead><tr><th>时间</th><th>文件</th><th>大小</th><th>号</th><th>结果</th><th>对象/URL</th></tr></thead>
-    <tbody id="recBody"></tbody>
-  </table>
-  </div>
-</div>
-
 <div class="card" id="sysCard" style="display:none">
   <h2>系统信息</h2>
   <div class="kv" id="sysKv"></div>
@@ -186,6 +172,20 @@ tr:hover td{background:#1a1f28}
     </div>
     <div style="color:var(--dim);font-size:11.5px">给号池里所有 bucket 建立 {n}d/ 前缀到期删除规则（用有权限的号执行）</div>
     <div id="lcResult" style="color:var(--muted);font-size:12px;margin-top:8px;line-height:1.8"></div>
+  </div>
+</div>
+
+<div class="card" style="margin-bottom:16px">
+  <div class="toolbar">
+    <h2 style="margin:0">上传记录（最近 10 条）</h2>
+    <div class="spacer"></div>
+    <button id="recRefreshBtn" class="sm">刷新</button>
+  </div>
+  <div style="overflow-x:auto">
+  <table>
+    <thead><tr><th>时间</th><th>文件</th><th>大小</th><th>号</th><th>结果</th><th>对象/URL</th></tr></thead>
+    <tbody id="recBody"></tbody>
+  </table>
   </div>
 </div>
 
