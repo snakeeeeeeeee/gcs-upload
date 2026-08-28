@@ -401,7 +401,29 @@ $('#uploadBtn').onclick=()=>{
 };
 function copyUrl(btn){
   const url=btn.parentElement.firstChild.textContent.trim();
-  navigator.clipboard.writeText(url).then(()=>toast('已复制 URL')).catch(()=>toast('复制失败'));
+  copyToClipboard(url,'已复制 URL');
+}
+
+/* 通用复制：HTTPS/localhost 用 clipboard API，HTTP 明文站点降级 execCommand */
+function copyToClipboard(t,msg){
+  const done=()=>toast(msg||'已复制');
+  const fail=()=>toast('复制失败');
+  if(navigator.clipboard&&window.isSecureContext){
+    navigator.clipboard.writeText(t).then(done).catch(()=>fallbackCopy(t,done,fail));
+  }else{
+    fallbackCopy(t,done,fail);
+  }
+}
+function fallbackCopy(t,done,fail){
+  const ta=document.createElement('textarea');
+  ta.value=t;
+  ta.style.position='fixed';ta.style.left='-9999px';ta.style.opacity='0';
+  document.body.appendChild(ta);
+  ta.focus();ta.select();
+  let ok=false;
+  try{ok=document.execCommand('copy');}catch(e){ok=false;}
+  document.body.removeChild(ta);
+  ok?done():fail();
 }
 
 /* 号池操作 */
@@ -469,7 +491,7 @@ function renderKeys(keys){
     </div></td>
   </tr>`).join(''):'<tr><td colspan="2" style="color:var(--dim)">暂无 API Key</td></tr>';
 }
-function copyText(t){navigator.clipboard.writeText(t).then(()=>toast('已复制')).catch(()=>toast('复制失败'));}
+function copyText(t){copyToClipboard(t,'已复制');}
 async function delKey(k){
   if(!confirm('确定删除该 API Key？'))return;
   try{await api('/admin/api-keys/'+encodeURIComponent(k),{method:'DELETE'});toast('已删除');loadKeys();}
