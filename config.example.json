@@ -8,6 +8,7 @@
   "retry_429_base": 1,
   "retry_429_max": 5,
   "signed_url_ttl": 604800,
+  "ttl_days": 7,
   "health_check_interval": 300,
   "keys_scan_interval": 60,
   "api_keys": [],

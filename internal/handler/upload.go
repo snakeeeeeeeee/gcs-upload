@@ -103,7 +103,10 @@ func (h *UploadHandler) Upload(w http.ResponseWriter, r *http.Request) {
 		contentType = "application/octet-stream"
 	}
 
-	object := newObjectName(header.Filename)
+	// 存储期限：统一取服务端配置的 TTL（后台统一设置，客户端不可改），object 名加 {n}d/ 前缀由生命周期规则到期删除
+	ttlDays := h.pool.TTLDays()
+
+	object := newObjectName(header.Filename, ttlDays)
 	// 每次重试重新打开临时文件，从 0 开始读
 	newReader := func() (io.ReadCloser, error) {
 		return os.Open(tmpName)
@@ -162,14 +165,19 @@ func clientIP(r *http.Request) string {
 	return host
 }
 
-// newObjectName 生成唯一对象路径：日期目录 + 时间戳 + 随机后缀 + 原扩展名
-// 随机后缀避免同秒并发写同一 object（GCS 同 object 限 1 写/秒）
-func newObjectName(filename string) string {
+// newObjectName 生成唯一对象路径：可选 {n}d/ TTL 前缀 + 日期目录 + 时间戳 + 随机后缀 + 原扩展名
+// 随机后缀避免同秒并发写同一 object（GCS 同 object 限 1 写/秒）；ttlDays>0 时加前缀供生命周期规则匹配
+func newObjectName(filename string, ttlDays int) string {
 	ext := safeExt(filename)
 	var b [6]byte
 	rand.Read(b[:])
 	now := time.Now()
-	return fmt.Sprintf("%s/%s-%s%s",
+	prefix := ""
+	if ttlDays > 0 {
+		prefix = fmt.Sprintf("%dd/", ttlDays)
+	}
+	return fmt.Sprintf("%s%s/%s-%s%s",
+		prefix,
 		now.Format("2006/01/02"),
 		now.Format("150405"),
 		hex.EncodeToString(b[:]),

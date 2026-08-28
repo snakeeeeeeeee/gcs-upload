@@ -115,6 +115,8 @@ func main() {
 	mux.HandleFunc("POST /admin/pool/accounts/{name}/{action}", adm.Auth(adm.ToggleAccount))
 	mux.HandleFunc("POST /admin/pool/accounts/{name}/probe", adm.Auth(adm.ProbeAccount))
 	mux.HandleFunc("POST /admin/config", adm.Auth(adm.UpdateConfig))
+	mux.HandleFunc("POST /admin/lifecycle", adm.Auth(adm.ConfigureLifecycle))
+	mux.HandleFunc("POST /admin/lifecycle-all", adm.Auth(adm.ConfigureLifecycleAll))
 	mux.HandleFunc("GET /admin/records", adm.Auth(adm.Records))
 	mux.HandleFunc("GET /admin/api-keys", adm.Auth(adm.ListAPIKeys))
 	mux.HandleFunc("POST /admin/api-keys", adm.Auth(adm.CreateAPIKey))

@@ -68,6 +68,7 @@ type Config struct {
 	Retry429Base    int             `json:"retry_429_base"`        // 429 退避基础秒数（指数增长），默认 1
 	Retry429Max     int             `json:"retry_429_max"`         // 429 最大退避次数，默认 5
 	SignedURLTTL    int             `json:"signed_url_ttl"`        // 返回签名 URL 有效期（秒），默认 2592000（30 天）；<=0 返回原生地址
+	TTLDays         int             `json:"ttl_days"`              // 存储期限（天），默认 7；全部文件到期自动删除，客户不可改；<=0 永久存储
 	HealthInterval  int             `json:"health_check_interval"` // 健康检查间隔（秒），默认 300（5 分钟）；0 关闭
 	ScanInterval    int             `json:"keys_scan_interval"`    // keys/ 目录自动扫描间隔（秒），默认 60；0 关闭
 	APIKeys         []string        `json:"api_keys"`               // 客户端 API Key 列表（Authorization: Bearer <key>）
@@ -141,6 +142,7 @@ type Pool struct {
 	retry429Base   time.Duration
 	retry429Max    int
 	signedTTL      time.Duration
+	ttlDays        atomic.Int32
 	healthInterval time.Duration
 	healthStop     chan struct{}
 	healthDone     chan struct{}
@@ -192,6 +194,9 @@ func New(ctx context.Context, cfg Config) (*Pool, error) {
 	if cfg.SignedURLTTL <= 0 {
 		cfg.SignedURLTTL = int(defaultSignedURLTTL.Seconds())
 	}
+	if cfg.TTLDays == 0 {
+		cfg.TTLDays = 7 // 默认存储 7 天
+	}
 	if time.Duration(cfg.SignedURLTTL)*time.Second > maxSignedURLTTL {
 		slog.Warn("pool: signed_url_ttl exceeds 7-day v4 limit, clamping to 7 days",
 			"configured_seconds", cfg.SignedURLTTL)
@@ -212,6 +217,7 @@ func New(ctx context.Context, cfg Config) (*Pool, error) {
 		retry429Base:   time.Duration(cfg.Retry429Base) * time.Second,
 		retry429Max:    cfg.Retry429Max,
 		signedTTL:      time.Duration(cfg.SignedURLTTL) * time.Second,
+		ttlDays:        atomic.Int32{},
 		healthInterval: time.Duration(cfg.HealthInterval) * time.Second,
 		healthStop:     make(chan struct{}),
 		healthDone:     make(chan struct{}),
@@ -224,6 +230,7 @@ func New(ctx context.Context, cfg Config) (*Pool, error) {
 			p.apiKeys[k] = struct{}{}
 		}
 	}
+	p.ttlDays.Store(int32(cfg.TTLDays))
 
 	for _, ac := range cfg.Accounts {
 		if ac.Name == "" {
@@ -697,6 +704,88 @@ func (p *Pool) SetEnabled(name string, enabled bool) error {
 	return fmt.Errorf("pool: account %q not found", name)
 }
 
+// ConfigureLifecycle 对指定 bucket 配置前缀生命周期规则（{n}d/ 前缀对象 n 天后自动删除）。
+// 用池内每个号的 client 依次尝试（读现有规则+合并新增，不覆盖已有规则）。
+// 返回 map：号名 → "ok" 或错误原因（权限不足的号会记录 403）。
+func (p *Pool) ConfigureLifecycle(bucket string, ttlDays []int) map[string]string {
+	result := map[string]string{}
+	p.mu.RLock()
+	accounts := make([]*Account, len(p.accounts))
+	copy(accounts, p.accounts)
+	p.mu.RUnlock()
+
+	for _, acc := range accounts {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+
+		attrs, err := acc.Client.Bucket(bucket).Attrs(ctx)
+		if err != nil {
+			result[acc.Name] = "读 bucket 失败: " + err.Error()
+			cancel()
+			continue
+		}
+		rules := attrs.Lifecycle.Rules
+		for _, d := range ttlDays {
+			if d < 1 {
+				continue
+			}
+			prefix := fmt.Sprintf("%dd/", d)
+			if hasLifecycleRule(rules, prefix) {
+				continue
+			}
+			rules = append(rules, storage.LifecycleRule{
+				Action: storage.LifecycleAction{Type: storage.DeleteAction},
+				Condition: storage.LifecycleCondition{
+					AgeInDays:     int64(d),
+					MatchesPrefix: []string{prefix},
+				},
+			})
+		}
+		_, err = acc.Client.Bucket(bucket).Update(ctx, storage.BucketAttrsToUpdate{
+			Lifecycle: &storage.Lifecycle{Rules: rules},
+		})
+		cancel()
+		if err != nil {
+			result[acc.Name] = "设置失败: " + err.Error()
+		} else {
+			result[acc.Name] = "ok"
+		}
+	}
+	return result
+}
+
+// ConfigureLifecycleAll 对号池内所有去重 bucket 配置前缀生命周期规则
+// 返回 map[bucket]map[account]result（按桶+号分组，方便前端展示）
+func (p *Pool) ConfigureLifecycleAll(ttlDays []int) map[string]map[string]string {
+	buckets := map[string]struct{}{}
+	p.mu.RLock()
+	for _, a := range p.accounts {
+		if a.Bucket != "" {
+			buckets[a.Bucket] = struct{}{}
+		}
+	}
+	p.mu.RUnlock()
+
+	results := map[string]map[string]string{}
+	for b := range buckets {
+		results[b] = p.ConfigureLifecycle(b, ttlDays)
+	}
+	return results
+}
+
+// hasLifecycleRule 判断规则列表里是否已有匹配该前缀的删除规则
+func hasLifecycleRule(rules []storage.LifecycleRule, prefix string) bool {
+	for _, r := range rules {
+		if r.Action.Type == storage.DeleteAction {
+			for _, m := range r.Condition.MatchesPrefix {
+				if m == prefix {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
 // SetDefaultBucket 运行时修改默认 bucket（影响后续添加的号）
 func (p *Pool) SetDefaultBucket(bucket string) {
 	p.mu.Lock()
@@ -838,6 +927,15 @@ func (p *Pool) MaxSize() int64 { return p.maxSize }
 // MaxSizeMB 单文件上限（MB，管理页展示用）
 func (p *Pool) MaxSizeMB() int64 {
 	return p.maxSize / 1024 / 1024
+}
+
+// TTLDays 全局存储期限（天）；<=0 表示永久存储
+func (p *Pool) TTLDays() int { return int(p.ttlDays.Load()) }
+
+// SetTTLDays 运行时修改全局存储期限（热生效，后续上传按新值加前缀）
+func (p *Pool) SetTTLDays(days int) {
+	p.ttlDays.Store(int32(days))
+	slog.Info("pool: ttl_days changed", "days", days)
 }
 
 // Retry 换号重试次数

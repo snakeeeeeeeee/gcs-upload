@@ -138,6 +138,7 @@ func (h *Handler) PoolInfo(w http.ResponseWriter, r *http.Request) {
 		"retry":           h.pool.Retry(),
 		"max_concurrent":  h.pool.MaxConcurrent(),
 		"request_timeout": int(h.pool.RequestTimeout().Seconds()),
+		"ttl_days":        h.pool.TTLDays(),
 		"stats":           h.pool.Stats(),
 		"accounts":        h.pool.Snapshot(),
 	})
@@ -322,10 +323,11 @@ func (h *Handler) ToggleAccount(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "name": name, "enabled": enabled})
 }
 
-// updateConfig POST /admin/config  body: {default_bucket?}
+// updateConfig POST /admin/config  body: {default_bucket?, ttl_days?}
 func (h *Handler) UpdateConfig(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		DefaultBucket string `json:"default_bucket"`
+		TTLDays       *int   `json:"ttl_days"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&req); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid json: "+err.Error())
@@ -342,7 +344,26 @@ func (h *Handler) UpdateConfig(w http.ResponseWriter, r *http.Request) {
 		}
 		slog.Info("admin: default_bucket changed", "bucket", req.DefaultBucket)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "default_bucket": h.pool.DefaultBucket()})
+	if req.TTLDays != nil {
+		if *req.TTLDays < 0 || *req.TTLDays > 365 {
+			writeErr(w, http.StatusBadRequest, "ttl_days must be 0-365 (0 = permanent)")
+			return
+		}
+		h.pool.SetTTLDays(*req.TTLDays)
+		h.mu.Lock()
+		err := h.updateConfig(func(cfg *pool.Config) { cfg.TTLDays = *req.TTLDays })
+		h.mu.Unlock()
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "persist config: "+err.Error())
+			return
+		}
+		slog.Info("admin: ttl_days changed", "days", *req.TTLDays)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":             true,
+		"default_bucket": h.pool.DefaultBucket(),
+		"ttl_days":       h.pool.TTLDays(),
+	})
 }
 
 // records GET /admin/records?limit=10
@@ -365,6 +386,45 @@ func (h *Handler) ProbeAccount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "name": name})
+}
+
+// ConfigureLifecycle POST /admin/lifecycle  body: {bucket, ttl_days: [1,7,30]}
+// 用号池里有权限的号配置指定 bucket 的前缀生命周期规则，返回每个号的结果
+func (h *Handler) ConfigureLifecycle(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Bucket  string `json:"bucket"`
+		TTLDays []int  `json:"ttl_days"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid json: "+err.Error())
+		return
+	}
+	if req.Bucket == "" || len(req.TTLDays) == 0 {
+		writeErr(w, http.StatusBadRequest, "bucket and ttl_days are required")
+		return
+	}
+	res := h.pool.ConfigureLifecycle(req.Bucket, req.TTLDays)
+	slog.Info("admin: lifecycle configured", "bucket", req.Bucket, "ttl", req.TTLDays, "results", res)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "bucket": req.Bucket, "ttl_days": req.TTLDays, "results": res})
+}
+
+// ConfigureLifecycleAll POST /admin/lifecycle-all  body: {ttl_days: [1,7,30]}
+// 对号池内所有去重 bucket 配置前缀生命周期规则（"全局"模式），按桶+号返回结果
+func (h *Handler) ConfigureLifecycleAll(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		TTLDays []int `json:"ttl_days"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid json: "+err.Error())
+		return
+	}
+	if len(req.TTLDays) == 0 {
+		writeErr(w, http.StatusBadRequest, "ttl_days required")
+		return
+	}
+	res := h.pool.ConfigureLifecycleAll(req.TTLDays)
+	slog.Info("admin: lifecycle configured (all)", "ttl", req.TTLDays, "buckets", len(res))
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "ttl_days": req.TTLDays, "buckets": res})
 }
 
 // ListAPIKeys GET /admin/api-keys
